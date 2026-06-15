@@ -1,0 +1,42 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "@tenderlo/shared": [
+        "../../packages/shared/src/index.ts"
+      ],
+      "@tenderlo/db": [
+        "../../packages/db/src/index.ts"
+      ],
+      "@tenderlo/intelligence": [
+        "../../packages/intelligence/src/index.ts"
+      ],
+      "@tenderlo/scoring": [
+        "../../packages/scoring/src/index.ts"
+      ],
+      "@tenderlo/notifications": [
+        "../../packages/notifications/src/index.ts"
+      ]
+    },
+    "incremental": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

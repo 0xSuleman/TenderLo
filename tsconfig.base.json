@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@tenderlo/shared": ["packages/shared/src/index.ts"],
+      "@tenderlo/db": ["packages/db/src/index.ts"],
+      "@tenderlo/sources": ["packages/sources/src/index.ts"],
+      "@tenderlo/parsing": ["packages/parsing/src/index.ts"],
+      "@tenderlo/intelligence": ["packages/intelligence/src/index.ts"],
+      "@tenderlo/scoring": ["packages/scoring/src/index.ts"],
+      "@tenderlo/notifications": ["packages/notifications/src/index.ts"]
+    }
+  }
+}

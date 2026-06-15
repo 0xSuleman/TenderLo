@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 42% 98%;
+  --foreground: 222 47% 11%;
+  --muted: 214 32% 92%;
+  --muted-foreground: 218 14% 38%;
+  --border: 214 28% 82%;
+  --primary: 213 80% 34%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 39 94% 54%;
+  --secondary-foreground: 222 47% 11%;
+  --accent: 187 74% 37%;
+  --accent-foreground: 0 0% 100%;
+  --success: 151 70% 31%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 95% 48%;
+  --warning-foreground: 222 47% 11%;
+  --destructive: 0 72% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --surface: 0 0% 100%;
+  --surface-strong: 210 40% 99%;
+  --ring-glow: 213 80% 48%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, hsl(213 80% 90% / 0.82), transparent 34rem),
+    radial-gradient(circle at bottom right, hsl(39 94% 87% / 0.76), transparent 30rem),
+    linear-gradient(135deg, hsl(210 42% 98%) 0%, hsl(190 48% 96%) 47%, hsl(42 100% 97%) 100%);
+  color: hsl(var(--foreground));
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  text-rendering: optimizeLegibility;
+}
+
+body::before {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  content: "";
+  background:
+    linear-gradient(115deg, hsl(213 80% 34% / 0.13), transparent 34%),
+    linear-gradient(245deg, hsl(39 94% 54% / 0.16), transparent 42%),
+    linear-gradient(180deg, hsl(0 0% 100% / 0.72), hsl(0 0% 100% / 0.28));
+}
+
+a {
+  text-decoration: none;
+}
+
+::selection {
+  background: hsl(var(--accent) / 0.38);
+}
+
+@layer utilities {
+  .premium-surface {
+    background:
+      linear-gradient(145deg, hsl(var(--surface) / 0.84), hsl(var(--surface-strong) / 0.62)),
+      linear-gradient(135deg, hsl(var(--primary) / 0.09), hsl(var(--secondary) / 0.08));
+    border-color: hsl(var(--border) / 0.72);
+    box-shadow: 0 18px 48px hsl(213 45% 18% / 0.1), inset 0 1px 0 hsl(0 0% 100% / 0.72);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  .premium-gradient {
+    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--accent)) 56%, hsl(var(--secondary)));
+  }
+
+  .premium-gradient-subtle {
+    background-image: linear-gradient(135deg, hsl(var(--primary) / 0.1), hsl(var(--accent) / 0.08), hsl(var(--secondary) / 0.12));
+  }
+
+  .premium-grid {
+    background-image:
+      linear-gradient(hsl(var(--primary) / 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--primary) / 0.06) 1px, transparent 1px);
+    background-size: 34px 34px;
+  }
+
+  .premium-focus {
+    outline: none;
+    transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+  }
+
+  .premium-focus:focus {
+    border-color: hsl(var(--primary) / 0.68);
+    box-shadow: 0 0 0 4px hsl(var(--ring-glow) / 0.16), 0 10px 30px hsl(213 45% 18% / 0.08);
+  }
+
+  .animate-rise {
+    animation: rise-in 520ms ease both;
+  }
+
+  .interactive-lift {
+    transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease, background-color 200ms ease;
+  }
+
+  .interactive-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 24px 64px hsl(213 45% 18% / 0.16);
+  }
+
+  .shimmer-surface {
+    position: relative;
+    overflow: hidden;
+    background: hsl(var(--muted) / 0.78);
+  }
+
+  .shimmer-surface::after {
+    position: absolute;
+    inset: 0;
+    content: "";
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.72), transparent);
+    animation: shimmer 1.8s linear infinite;
+  }
+
+  .motion-safe-delay-1 {
+    animation-delay: 90ms;
+  }
+
+  .motion-safe-delay-2 {
+    animation-delay: 180ms;
+  }
+
+  .motion-safe-delay-3 {
+    animation-delay: 270ms;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@tenderlo/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./jobs": "./src/jobs.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@tenderlo/db": "^0.1.0",
+    "@tenderlo/intelligence": "^0.1.0",
+    "@tenderlo/notifications": "^0.1.0",
+    "@tenderlo/parsing": "^0.1.0",
+    "@tenderlo/scoring": "^0.1.0",
+    "@tenderlo/shared": "^0.1.0",
+    "@tenderlo/sources": "^0.1.0",
+    "node-cron": "^3.0.3",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

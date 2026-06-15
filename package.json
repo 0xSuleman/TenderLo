@@ -1,0 +1,37 @@
+{
+  "name": "tenderlo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TenderLo - Pakistan Tender Intelligence SaaS for contractor companies.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @tenderlo/web",
+    "worker": "npm run dev -w @tenderlo/worker",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "npm run lint -w @tenderlo/web",
+    "db:push": "supabase db push",
+    "db:types": "supabase gen types typescript --local > packages/db/src/generated.types.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^6.4.17",
+    "@types/pdf-parse": "^1.1.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=9.0.0"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9"
+  }
+}
