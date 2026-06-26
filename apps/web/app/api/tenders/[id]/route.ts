@@ -36,8 +36,11 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         department: tender.department,
         province: tender.province,
         city: tender.city,
+        category: tender.procurement_category,
+        procurement_category: tender.procurement_category,
         sector: tender.sector,
         closing_date: tender.closing_date,
+        active_status: formatActiveStatus(tender.status, tender.closing_date),
         status: tender.status,
         tender_sources: tender.tender_sources,
         preview_notice: "Full tender details require an active TenderLo plan."
@@ -46,10 +49,43 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 
     const [{ data: fields }, { data: docs }] = await Promise.all([
       admin.from("extracted_fields").select("*").eq("tender_id", id).neq("verification_status", "rejected").order("confidence_score", { ascending: false }),
-      admin.from("tender_documents").select("id, source_url, original_filename, mime_type, page_count, parser_status, ocr_status").eq("tender_id", id)
+      admin.from("tender_documents").select("id, storage_path, source_url, original_filename, mime_type, page_count, parser_status, ocr_status").eq("tender_id", id)
     ]);
-    return ok({ ...tender, extracted_fields: fields, documents: docs });
+    return ok({
+      ...tender,
+      category: tender.procurement_category,
+      tender_type: tender.procurement_category,
+      active_status: formatActiveStatus(tender.status, tender.closing_date),
+      estimated_cost: formatEstimatedCost(tender.estimated_value),
+      extracted_fields: fields,
+      documents: (docs ?? []).map((doc: any) => ({
+        ...doc,
+        download_url: `/tender_files/${encodeStoragePath(doc.storage_path)}`
+      }))
+    });
   } catch (error) {
     return fail(error);
   }
+}
+
+function formatActiveStatus(status: string, closingDate: string | null): "Active" | "Expired / Non-Active" {
+  if (!["published", "corrigendum"].includes(status)) return "Expired / Non-Active";
+  if (!closingDate) return "Active";
+  return Date.parse(closingDate) >= startOfToday().getTime() ? "Active" : "Expired / Non-Active";
+}
+
+function formatEstimatedCost(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "Cost Not Available";
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "Cost Not Available";
+  return `Rs. ${new Intl.NumberFormat("en-PK", { maximumFractionDigits: 0 }).format(amount)}`;
+}
+
+function startOfToday(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
+function encodeStoragePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }

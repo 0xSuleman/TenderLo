@@ -1,11 +1,11 @@
 import { FileSearch, Search } from "lucide-react";
-import { contractorSectors, pakistanProvinces, tenderSearchSchema } from "@tenderlo/shared";
+import { tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 import { MarketingNav } from "@/components/nav";
 import { MotionItem, MotionList } from "@/components/motion";
 import { Badge, Button, Card, EmptyState, Field, Input, LinkButton, PageHeader, Select } from "@/components/ui";
 import { createSupabaseAdminClient } from "@/lib/supabase";
 import { formatDate } from "@/lib/utils";
-import { listTenderSourceOptions, searchTenders, type TenderSearchResult, type TenderSourceOption } from "@/lib/tender-search";
+import { listTenderFilterOptions, searchTenders, type TenderFilterOptions, type TenderSearchResult } from "@/lib/tender-search";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +13,30 @@ const publicSortOptions = [
   ["relevance", "Relevance"],
   ["newest", "Newest"],
   ["closing_soon", "Closing soon"]
+] as const;
+
+const availabilityOptions = [
+  ["active", "Active Tenders"],
+  ["non_active", "Expired / Non-Active"],
+  ["all", "All Tenders"]
+] as const;
+
+const closingDateOptions = [
+  ["any", "Closing Date (Any)"],
+  ["today", "Today"],
+  ["tomorrow", "Tomorrow"],
+  ["next_3_days", "Next 3 Days"],
+  ["next_1_week", "Next 1 week"],
+  ["next_1_month", "Next 1 Month"]
+] as const;
+
+const estimatedCostOptions = [
+  ["any", "Estimated Cost (Any)"],
+  ["not_available", "Cost Not Available"],
+  ["under_10_lac", "Under 10 Lac"],
+  ["10_lac_50_lac", "10 Lac - 50 Lac"],
+  ["50_lac_1_crore", "50 Lac - 1 Crore"],
+  ["1_crore_plus", "1 Crore+"]
 ] as const;
 
 export default async function PublicTenderPreviewPage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }): Promise<JSX.Element> {
@@ -25,10 +49,10 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
     pagination: { page: input.page, limit: input.limit, total: 0, totalPages: 0 },
     meta: { planAccess: "free", appliedFilters: {} }
   };
-  let sources: TenderSourceOption[] = [];
+  let filterOptions: TenderFilterOptions = { categories: [], cities: [], provinces: [], organizations: [], sources: [] };
 
   try {
-    sources = await listTenderSourceOptions(admin);
+    filterOptions = await listTenderFilterOptions(admin);
     result = await searchTenders(admin, input, { isOps: false, hasPaidAccess: false });
   } catch {
     result = {
@@ -42,22 +66,20 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
     <>
       <MarketingNav />
       <main className="mx-auto max-w-6xl px-4 py-12">
-        <PageHeader title="Public Tender Preview" body="Limited previews from published TenderLo records." />
+        <PageHeader title="Public Tender Preview" body="Limited previews from TenderLo records, filtered by status, urgency, cost range, category, geography, and issuing organization." />
         <Card className="mb-6">
           <form className="grid gap-3 lg:grid-cols-[1.4fr_180px_180px_180px_auto]" method="get">
             <Field label="Keyword">
               <Input name="q" defaultValue={input.q ?? ""} placeholder="Roads, HVAC, WASA" />
             </Field>
-            <Field label="Province">
-              <Select name="province" defaultValue={input.province ?? ""}>
-                <option value="">All provinces</option>
-                {pakistanProvinces.map((province) => <option key={province} value={province}>{province}</option>)}
+            <Field label="Status">
+              <Select name="availability" defaultValue={input.availability}>
+                {availabilityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </Select>
             </Field>
-            <Field label="Sector">
-              <Select name="sector" defaultValue={input.sector ?? ""}>
-                <option value="">All sectors</option>
-                {contractorSectors.map((sector) => <option key={sector} value={sector}>{sector.replaceAll("_", " ")}</option>)}
+            <Field label="Closing date">
+              <Select name="closing_date_filter" defaultValue={input.closing_date_filter}>
+                {closingDateOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </Select>
             </Field>
             <Field label="Sort">
@@ -70,22 +92,33 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
               Search
             </Button>
             <div className="grid gap-3 lg:col-span-5 lg:grid-cols-[180px_180px_180px_180px_1fr]">
+              <Field label="Estimated cost">
+                <Select name="estimated_cost_filter" defaultValue={input.estimated_cost_filter}>
+                  {estimatedCostOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </Select>
+              </Field>
+              <Field label="Category">
+                <Select name="category" defaultValue={input.category ?? ""}>
+                  <option value="">All Categories</option>
+                  {filterOptions.categories.map((category) => <option key={category} value={category}>{category}</option>)}
+                </Select>
+              </Field>
               <Field label="City">
-                <Input name="city" defaultValue={input.city ?? ""} />
+                <Select name="city" defaultValue={input.city ?? ""}>
+                  <option value="">All Cities</option>
+                  {filterOptions.cities.map((city) => <option key={city} value={city}>{city}</option>)}
+                </Select>
               </Field>
-              <Field label="Department">
-                <Input name="department" defaultValue={input.department ?? ""} />
+              <Field label="Province">
+                <Select name="province" defaultValue={input.province ?? ""}>
+                  <option value="">All Provinces</option>
+                  {filterOptions.provinces.map((province) => <option key={province} value={province}>{province}</option>)}
+                </Select>
               </Field>
-              <Field label="Closing after">
-                <Input name="closing_date_after" type="date" defaultValue={input.closing_date_after ?? ""} />
-              </Field>
-              <Field label="Closing before">
-                <Input name="closing_date_before" type="date" defaultValue={input.closing_date_before ?? ""} />
-              </Field>
-              <Field label="Source">
-                <Select name="source" defaultValue={input.source ?? ""}>
-                  <option value="">All sources</option>
-                  {sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
+              <Field label="Organization">
+                <Select name="organization" defaultValue={input.organization ?? input.department ?? ""}>
+                  <option value="">All Organizations</option>
+                  {filterOptions.organizations.map((organization) => <option key={organization} value={organization}>{organization}</option>)}
                 </Select>
               </Field>
             </div>
@@ -112,14 +145,15 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
               <MotionItem key={String(tender.id)}>
                 <Card>
                   <div className="mb-3 flex flex-wrap gap-2">
-                    <Badge tone="good">{String(tender.status ?? "published")}</Badge>
+                    <Badge tone={tender.active_status === "Active" ? "good" : "warn"}>{String(tender.active_status ?? "Active")}</Badge>
+                    {tender.category ? <Badge>{String(tender.category)}</Badge> : null}
                     {tender.sector ? <Badge>{String(tender.sector).replaceAll("_", " ")}</Badge> : null}
                   </div>
                   <h2 className="font-semibold">{String(tender.title ?? "Untitled tender")}</h2>
                   <p className="mt-2 text-sm text-muted-foreground">{String(tender.department ?? "Department needs review")} · {String(tender.city ?? tender.province ?? "Pakistan")}</p>
                   <p className="mt-2 text-sm">Closing: {formatDate(tender.closing_date as string | null | undefined)}</p>
                   {typeof tender.preview === "string" && tender.preview ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{tender.preview}</p> : null}
-                  <LinkButton className="mt-4" href={`/tenders/${String(tender.id)}`}>Open preview</LinkButton>
+                  <LinkButton className="mt-4" href={tenderHref(tender)}>Open preview</LinkButton>
                 </Card>
               </MotionItem>
             ))}
@@ -135,6 +169,10 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
       </main>
     </>
   );
+}
+
+function tenderHref(tender: Record<string, unknown>): string {
+  return tenderDetailPath(String(tender.title ?? "tender"), String(tender.id));
 }
 
 function pageHref(path: string, params: Record<string, string | undefined>, page: number): string {

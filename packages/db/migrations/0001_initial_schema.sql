@@ -165,6 +165,7 @@ create table if not exists tender_sources (
   last_run_at timestamptz,
   last_success_at timestamptz,
   consecutive_failures integer not null default 0,
+  metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -249,6 +250,10 @@ create table if not exists tender_documents (
   parser_status parser_status not null default 'pending',
   ocr_status ocr_status not null default 'not_needed',
   content_hash text not null,
+  source_group text,
+  document_prefix text,
+  source_document_key text,
+  fetched_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (tender_id, content_hash)
@@ -572,6 +577,7 @@ create index if not exists memberships_user_idx on memberships(user_id, status);
 create index if not exists memberships_org_idx on memberships(organization_id, role, status);
 create index if not exists profile_documents_org_idx on profile_documents(organization_id, document_type);
 create index if not exists tender_sources_status_idx on tender_sources(status, last_run_at);
+create index if not exists tender_sources_metadata_gin_idx on tender_sources using gin(metadata);
 create index if not exists ingestion_runs_source_idx on ingestion_runs(source_id, started_at desc);
 create index if not exists tenders_status_closing_idx on tenders(status, closing_date);
 create index if not exists tenders_search_idx on tenders using gin(search_document);
@@ -583,6 +589,7 @@ create index if not exists tenders_department_trgm_idx on tenders using gin(depa
 create index if not exists tenders_estimated_value_idx on tenders(estimated_value);
 create index if not exists tenders_bid_security_idx on tenders(bid_security_amount);
 create index if not exists tender_documents_tender_idx on tender_documents(tender_id);
+create index if not exists tender_documents_source_trace_idx on tender_documents(source_group, document_prefix, source_document_key);
 create index if not exists parsed_document_text_doc_idx on parsed_document_text(tender_document_id);
 create index if not exists extracted_fields_tender_field_idx on extracted_fields(tender_id, field_name);
 create index if not exists extracted_fields_field_value_idx on extracted_fields(field_name, field_value, verification_status, tender_id);

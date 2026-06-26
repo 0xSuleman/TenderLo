@@ -61,15 +61,77 @@ export const contractorSectors = [
   "uncategorized"
 ] as const;
 
-export const pakistanProvinces = [
-  "Punjab",
-  "Sindh",
-  "Khyber Pakhtunkhwa",
-  "Balochistan",
-  "Islamabad Capital Territory",
-  "Gilgit-Baltistan",
-  "Azad Jammu and Kashmir"
+export const tenderCategories = [
+  "Accommodation & Hospitality",
+  "Advertising & Marketing",
+  "Agricultural Supplies",
+  "Asset Disposal & Auction",
+  "Audio Visual & Broadcasting",
+  "Audit & Verification",
+  "Building Maintenance",
+  "Catering & Food Services",
+  "Chemicals & Industrial Materials",
+  "Cleaning & Janitorial",
+  "Construction & Civil Works",
+  "Consultancy Services",
+  "Cultural & Religious",
+  "Defence & Military Supplies",
+  "Educational Supplies",
+  "Electrical Works & Equipment",
+  "Event Management",
+  "Facility Management",
+  "Financial & Insurance Services",
+  "Furniture & Furnishings",
+  "Hardware & Tools",
+  "Human Resources & Recruitment",
+  "HVAC & Refrigeration",
+  "Industrial Equipment",
+  "IT & Computer Equipment",
+  "IT Services & Support",
+  "Laboratory Equipment & Services",
+  "Landscaping & Horticulture",
+  "Legal & Judicial Services",
+  "Marine & Vessel Services",
+  "Mechanical Works & Equipment",
+  "Medical & Surgical Supplies",
+  "Medical Equipment",
+  "Metals & Scrap",
+  "Mining & Quarrying",
+  "Miscellaneous",
+  "Office Equipment & Supplies",
+  "Pharmaceuticals",
+  "Plant & Machinery",
+  "Plastics & Packaging",
+  "Real Estate & Property",
+  "Road & Infrastructure Works",
+  "Scientific Instruments",
+  "Security & Safety Equipment",
+  "Solar & Power Equipment",
+  "Sports & Recreation",
+  "Stationery & Printing",
+  "Telecommunication",
+  "Training & Education Services",
+  "Transportation & Logistics",
+  "Uniforms & Textiles",
+  "Vehicle Maintenance",
+  "Vehicles & Auto Parts",
+  "Waste Management & Environment",
+  "Water Supply & Sanitation"
 ] as const;
+
+export const pakistanProvinces = [
+  "Azad Jammu & Kashmir (AJK)",
+  "Balochistan",
+  "Gilgit-Baltistan",
+  "Islamabad Capital Territory",
+  "Khyber Pakhtunkhwa",
+  "Punjab",
+  "Sindh"
+] as const;
+
+export const tenderAvailabilityFilters = ["active", "non_active", "all"] as const;
+export const closingDateFilters = ["any", "today", "tomorrow", "next_3_days", "next_1_week", "next_1_month"] as const;
+export const estimatedCostFilters = ["any", "not_available", "under_10_lac", "10_lac_50_lac", "50_lac_1_crore", "1_crore_plus"] as const;
 
 export const majorPakistanCities = [
   "Karachi",
@@ -118,6 +180,10 @@ export type NotificationStatus = (typeof notificationStatuses)[number];
 export type ComplianceStatus = (typeof complianceStatuses)[number];
 export type RecommendationStatus = (typeof recommendationStatuses)[number];
 export type ContractorSector = (typeof contractorSectors)[number];
+export type TenderCategory = (typeof tenderCategories)[number];
+export type TenderAvailabilityFilter = (typeof tenderAvailabilityFilters)[number];
+export type ClosingDateFilter = (typeof closingDateFilters)[number];
+export type EstimatedCostFilter = (typeof estimatedCostFilters)[number];
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
 export const uuidSchema = z.string().uuid();
@@ -223,11 +289,16 @@ export const tenderSearchSorts = [
 export const tenderSearchSchema = z
   .object({
     q: optionalSearchString(240),
+    availability: z.preprocess(blankToUndefined, z.enum(tenderAvailabilityFilters).optional()).default("active"),
+    closing_date_filter: z.preprocess(blankToUndefined, z.enum(closingDateFilters).optional()).default("any"),
+    estimated_cost_filter: z.preprocess(blankToUndefined, z.enum(estimatedCostFilters).optional()).default("any"),
+    category: z.preprocess(blankToUndefined, z.enum(tenderCategories).optional()),
     province: optionalSearchString(120),
     city: optionalSearchString(120),
     sector: z.preprocess(blankToUndefined, z.enum(contractorSectors).optional()),
     source: z.preprocess(blankToUndefined, uuidSchema.optional()),
     source_id: z.preprocess(blankToUndefined, uuidSchema.optional()),
+    organization: optionalSearchString(160),
     department: optionalSearchString(160),
     closing_date_after: optionalSearchDate,
     closing_date_before: optionalSearchDate,
@@ -257,12 +328,17 @@ export const tenderSearchSchema = z
     const source = input.source ?? input.source_id;
     return {
       q: input.q,
+      availability: input.availability,
+      closing_date_filter: input.closing_date_filter,
+      estimated_cost_filter: input.estimated_cost_filter,
+      category: input.category,
       province: input.province,
       city: input.city,
       sector: input.sector,
       source,
       source_id: source,
-      department: input.department,
+      organization: input.organization ?? input.department,
+      department: input.department ?? input.organization,
       closing_date_after: closingDateAfter,
       closing_date_before: closingDateBefore,
       deadline_from: closingDateAfter,
@@ -300,7 +376,7 @@ export const tenderManualSchema = z.object({
   source_url: z.string().url().nullable().optional(),
   tender_number: z.string().trim().max(160).nullable().optional(),
   department: z.string().trim().max(240).nullable().optional(),
-  procurement_category: z.string().trim().max(160).nullable().optional(),
+  procurement_category: z.enum(tenderCategories).nullable().optional(),
   sector: z.enum(contractorSectors).nullable().optional(),
   province: z.string().trim().max(120).nullable().optional(),
   city: z.string().trim().max(120).nullable().optional(),
@@ -356,6 +432,10 @@ export interface RawTenderDocument {
   filename?: string;
   mimeType?: string;
   contentHash?: string;
+  sourceLabel?: string | undefined;
+  originalSourceUrl?: string | undefined;
+  websiteUrl?: string | undefined;
+  sourceDocumentKey?: string | undefined;
 }
 
 export interface RawSourceSnapshotPayload {
@@ -367,6 +447,11 @@ export interface RawSourceSnapshotPayload {
 export interface RawTenderPayload {
   sourceUrl: string;
   title: string;
+  sourceGroup?: string | undefined;
+  sourceLabel?: string | undefined;
+  originalSourceUrl?: string | undefined;
+  websiteUrl?: string | undefined;
+  sourceMetadata?: Json | undefined;
   tenderNumber?: string;
   department?: string;
   procurementCategory?: string;
@@ -379,6 +464,9 @@ export interface RawTenderPayload {
   bidSecurityAmount?: number;
   estimatedValue?: number;
   documentFee?: number;
+  procurementMethod?: string;
+  submissionMethod?: string;
+  contactPerson?: string;
   newspaperName?: string;
   publicationDate?: string;
   pageSection?: string;
@@ -393,6 +481,7 @@ export interface SourceAdapterContext {
   baseUrl: string;
   adapterKey: string;
   userAgent: string;
+  metadata?: Json | undefined;
 }
 
 export interface SourceAdapter {
@@ -555,6 +644,15 @@ export function normalizeForSearch(value: string): string {
 
 export function slugify(value: string): string {
   return normalizeForSearch(value).replace(/\s+/g, "-").replace(/-+/g, "-");
+}
+
+export function tenderDetailPath(title: string, id: string): string {
+  return `/tender/${slugify(title || "tender")}-${id}`;
+}
+
+export function parseTenderIdFromSlug(slug: string): string | null {
+  const id = slug.slice(-36);
+  return uuidSchema.safeParse(id).success ? id : null;
 }
 
 export function daysUntil(dateValue: string | Date | null | undefined, now = new Date()): number | null {

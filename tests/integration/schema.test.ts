@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { tenderSearchSchema } from "@tenderlo/shared";
+import { parseTenderIdFromSlug, tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 
 const migration = readFileSync("packages/db/migrations/0001_initial_schema.sql", "utf8");
 
@@ -9,6 +9,11 @@ describe("database contract", () => {
     for (const table of ["extracted_fields", "qa_tasks", "raw_source_snapshots", "recommendations", "compliance_checks", "audit_logs"]) {
       expect(migration).toContain(`create table if not exists ${table}`);
     }
+    expect(migration).toContain("metadata jsonb not null default '{}'::jsonb");
+    expect(migration).toContain("source_group text");
+    expect(migration).toContain("document_prefix text");
+    expect(migration).toContain("source_document_key text");
+    expect(migration).toContain("fetched_at timestamptz not null default now()");
   });
 
   it("enables RLS and private storage buckets", () => {
@@ -42,6 +47,8 @@ describe("database contract", () => {
       "tenders_department_trgm_idx",
       "tenders_estimated_value_idx",
       "tenders_bid_security_idx",
+      "tender_sources_metadata_gin_idx",
+      "tender_documents_source_trace_idx",
       "extracted_fields_field_value_idx",
       "recommendations_org_status_score_idx"
     ]) {
@@ -73,5 +80,13 @@ describe("database contract", () => {
     expect(input.limit).toBe(50);
     expect(input.page_size).toBe(50);
     expect(input.tender_status).toBe("published");
+  });
+
+  it("builds and parses canonical tender detail slugs", () => {
+    const id = "00000000-0000-4000-8000-000000000123";
+    const path = tenderDetailPath("Road Rehabilitation Works", id);
+    expect(path).toBe(`/tender/road-rehabilitation-works-${id}`);
+    expect(parseTenderIdFromSlug(path.split("/").pop() ?? "")).toBe(id);
+    expect(parseTenderIdFromSlug("bad-slug")).toBeNull();
   });
 });

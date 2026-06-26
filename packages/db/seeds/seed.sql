@@ -171,15 +171,41 @@ where not exists (
     and audit_logs.entity_id = seed_admin.organization_id
 );
 
-insert into tender_sources (name, base_url, source_type, region, adapter_key, scrape_frequency_minutes, status)
+insert into tender_sources (name, base_url, source_type, region, adapter_key, scrape_frequency_minutes, status, metadata)
 values
-  ('Federal EPADS Open Procurements', 'https://epads.gov.pk/open-procurements', 'federal', 'Pakistan', 'federal-epads', 240, 'active'),
-  ('Federal PPRA Active Tenders', 'https://epms.ppra.gov.pk/public/tenders/active-tenders', 'federal', 'Pakistan', 'federal-ppra-active', 240, 'active'),
-  ('Punjab PPRA', 'https://ppra.punjab.gov.pk/', 'provincial', 'Punjab', 'punjab-ppra', 360, 'active'),
-  ('Sindh SPPRA Tender List', 'https://e.pprasindh.gov.pk/tenderlst', 'provincial', 'Sindh', 'sindh-sppra', 360, 'active'),
-  ('KP Public Tenders', 'https://kp.gov.pk/page/tenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-tenders', 720, 'active'),
-  ('Business Recorder Tenders', 'https://www.brecorder.com/business-finance/tenders', 'newspaper', 'Pakistan', 'business-recorder-tenders', 720, 'active'),
-  ('Jang Public E-Paper Karachi', 'https://e.jang.com.pk/karachi/', 'newspaper', 'Pakistan', 'jang-epaper-public', 1440, 'active')
+  ('Federal EPADS Open Procurements', 'https://epads.gov.pk/works/procurements', 'federal', 'Pakistan', 'federal-epads', 15, 'active', jsonb_build_object(
+    'sourceGroup', 'ppra_epads',
+    'portalFamily', 'ppra_epads',
+    'documentPrefix', 'tender_ppra2',
+    'knownSourceDomains', array['epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','ppra.org.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
+  )),
+  ('Federal PPRA Active Tenders', 'https://epms.ppra.gov.pk/public/tenders/active-tenders', 'federal', 'Pakistan', 'federal-ppra-active', 15, 'active', jsonb_build_object(
+    'sourceGroup', 'ppra_epads',
+    'portalFamily', 'ppra_epads',
+    'documentPrefix', 'tender_ppra2',
+    'knownSourceDomains', array['ppra.org.pk','epms.ppra.gov.pk','epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
+  )),
+  ('Punjab PPRA Public Procurement', 'https://ppra.punjab.gov.pk/public_procurement', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', '{}'::jsonb),
+  ('Sindh SPPRA Tender List', 'https://e.pprasindh.gov.pk/tenderlst', 'provincial', 'Sindh', 'sindh-sppra', 15, 'active', jsonb_build_object(
+    'sourceGroup', 'sindh_sppra',
+    'portalFamily', 'sindh_sppra',
+    'documentPrefix', 'tender_SINDH',
+    'knownSourceDomains', array['pprasindh.gov.pk','e.pprasindh.gov.pk','epads.pprasindh.gov.pk','portalsindh.eprocure.gov.pk','sindh.eprocure.gov.pk','sindhbank.com.pk','educationcity.gos.pk','tenders.iba.edu.pk','uok.edu.pk']
+  )),
+  ('Khyber Pakhtunkhwa PPRA Active Tenders', 'https://www.kppra.gov.pk/kppra/activetenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-ppra-active', 15, 'active', jsonb_build_object(
+    'sourceGroup', 'kp_kppra',
+    'portalFamily', 'kp_kppra',
+    'documentPrefix', 'tender_kppra',
+    'knownSourceDomains', array['kppra.gov.pk','portal.kppra.gov.pk','kp.eprocure.gov.pk','portalkp.eprocure.gov.pk','phedkp.gov.pk','lgkp.gov.pk','irrigation.gkp.pk','kth.edu.pk','kpogcl.com.pk','sbbwup.edu.pk','pkha.gov.pk']
+  )),
+  ('Balochistan PPRA Tender Search', 'https://bppqa.vdc.services/tenderssearch/', 'provincial', 'Balochistan', 'balochistan-bppra', 15, 'active', '{}'::jsonb),
+  ('Business Recorder Tenders', 'https://www.brecorder.com/business-finance/tenders', 'newspaper', 'Pakistan', 'business-recorder-tenders', 1440, 'active', '{}'::jsonb),
+  ('Dawn Public Tender Notices', 'https://www.dawn.com/classifieds/tenders', 'newspaper', 'Pakistan', 'dawn-public-tenders', 1440, 'active', '{}'::jsonb),
+  ('Daily Jang Public E-Paper', 'https://e.jang.com.pk/', 'newspaper', 'Pakistan', 'jang-epaper-public', 1440, 'active', '{}'::jsonb),
+  ('Daily Express Public E-Paper', 'https://www.express.com.pk/epaper/', 'newspaper', 'Pakistan', 'express-epaper-public', 1440, 'active', '{}'::jsonb),
+  ('UNGM Pakistan Public Notices', 'https://www.ungm.org/public/notice', 'department', 'Pakistan', 'ungm-public-pakistan', 15, 'active', '{}'::jsonb),
+  ('IOM Pakistan Procurement Opportunities', 'https://pakistan.iom.int/procurement-opportunities', 'department', 'Pakistan', 'iom-pakistan-procurement', 15, 'active', '{}'::jsonb),
+  ('DevelopmentAid Pakistan Public Tenders', 'https://www.developmentaid.org/tenders/search?locations=167&showAdvancedFilters=1', 'department', 'Pakistan', 'developmentaid-pakistan-public', 15, 'active', '{}'::jsonb)
 on conflict do nothing;
 
 insert into field_extraction_rules (field_name, rule_type, pattern, source_adapter_key, confidence_weight, enabled)

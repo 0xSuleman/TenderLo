@@ -590,7 +590,7 @@ Supabase user profile extension.
 ### Tender Database
 
 - The system shall store normalized tender records.
-- A tender shall include title, source, source URL, tender/reference number, department, procurement category, sector, province, city, description, advertisement date, closing date, opening date, bid security, estimated value, document fee, status, and attachments.
+- A tender shall include title, active availability, estimated cost, source, source URL, tender/reference number, department/issuing authority, procurement category, sector, tender type, province, city, country, description, advertisement date, closing date, opening date, bid security, estimated value, document fee, contact person when available, status, and attachments.
 - The system shall support tender statuses `draft`, `published`, `closed`, `cancelled`, `corrigendum`, and `under_review`.
 - When a tender closing date has passed, the system shall automatically mark the tender as `closed`.
 - The system shall preserve the original source URL and raw source snapshot for every ingested tender.
@@ -627,6 +627,8 @@ Supabase user profile extension.
 
 - The system shall classify tenders into sectors using weighted keyword matching.
 - Supported contractor sectors shall include construction, roads, highways, bridges, buildings, MEP, electrical, power, mechanical, HVAC, plumbing, fire safety, water, sewerage, sanitation, telecom infrastructure, IT infrastructure, oil and gas works, industrial maintenance, and general contracting.
+- The system shall map tender procurement categories to this controlled 55-category taxonomy: Accommodation & Hospitality; Advertising & Marketing; Agricultural Supplies; Asset Disposal & Auction; Audio Visual & Broadcasting; Audit & Verification; Building Maintenance; Catering & Food Services; Chemicals & Industrial Materials; Cleaning & Janitorial; Construction & Civil Works; Consultancy Services; Cultural & Religious; Defence & Military Supplies; Educational Supplies; Electrical Works & Equipment; Event Management; Facility Management; Financial & Insurance Services; Furniture & Furnishings; Hardware & Tools; Human Resources & Recruitment; HVAC & Refrigeration; Industrial Equipment; IT & Computer Equipment; IT Services & Support; Laboratory Equipment & Services; Landscaping & Horticulture; Legal & Judicial Services; Marine & Vessel Services; Mechanical Works & Equipment; Medical & Surgical Supplies; Medical Equipment; Metals & Scrap; Mining & Quarrying; Miscellaneous; Office Equipment & Supplies; Pharmaceuticals; Plant & Machinery; Plastics & Packaging; Real Estate & Property; Road & Infrastructure Works; Scientific Instruments; Security & Safety Equipment; Solar & Power Equipment; Sports & Recreation; Stationery & Printing; Telecommunication; Training & Education Services; Transportation & Logistics; Uniforms & Textiles; Vehicle Maintenance; Vehicles & Auto Parts; Waste Management & Environment; Water Supply & Sanitation.
+- The system shall use these seven major Pakistan administrative region filter values: Azad Jammu & Kashmir (AJK), Balochistan, Gilgit-Baltistan, Islamabad Capital Territory, Khyber Pakhtunkhwa, Punjab, and Sindh.
 - The system shall weight title matches higher than document body matches.
 - When multiple sectors match, the system shall assign the highest scoring sector and store secondary matches.
 - If no sector reaches the minimum confidence threshold, the system shall classify the tender as `uncategorized` and create a QA task.
@@ -642,7 +644,8 @@ Supabase user profile extension.
 ### Search
 
 - The system shall provide full-text search across tender title, description, department, sector, city, and province through the generated Postgres `search_document` tsvector. Source and extracted document text must be preserved for auditability and may be incorporated into ranked search through controlled database changes.
-- The system shall allow filtering by `province`, `city`, `sector`, `source`, `department`, `closing_date_after`, `closing_date_before`, `bid_security_min`, `bid_security_max`, `estimated_value_min`, `estimated_value_max`, `eligible_only`, `pec_category`, and `tender_status`.
+- The system shall allow primary tender filtering by active availability (`active`, `non_active`, `all`), closing date preset (`any`, `today`, `tomorrow`, `next_3_days`, `next_1_week`, `next_1_month`), estimated cost preset (`any`, `not_available`, `under_10_lac`, `10_lac_50_lac`, `50_lac_1_crore`, `1_crore_plus`), 55-category taxonomy value, city, province, and issuing organization/department.
+- The system shall continue to accept compatible advanced API filters where already implemented: `province`, `city`, `sector`, `source`, `department`, `closing_date_after`, `closing_date_before`, `bid_security_min`, `bid_security_max`, `estimated_value_min`, `estimated_value_max`, `eligible_only`, `pec_category`, and `tender_status`.
 - The system shall allow sorting by `relevance`, `newest`, `closing_soon`, `estimated_value_asc`, `estimated_value_desc`, `bid_security_asc`, `bid_security_desc`, and `recommendation_score`.
 - Search URLs shall be shareable through query parameters. The authenticated SaaS search route is `/search`; the public preview route is `/tenders`.
 - `GET /api/tenders` shall return `{ data, pagination, meta }`, where pagination includes `page`, `limit`, `total`, and `totalPages`, and meta includes `planAccess` and `appliedFilters`.
@@ -766,7 +769,7 @@ Newspaper ingestion requirements:
 
 ### Tenders
 
-- `GET /api/tenders` with optional filters: `q`, `province`, `city`, `sector`, `source`, `department`, `closing_date_after`, `closing_date_before`, `bid_security_min`, `bid_security_max`, `estimated_value_min`, `estimated_value_max`, `tender_status`, `pec_category`, `eligible_only`, `sort`, `page`, `limit`
+- `GET /api/tenders` with optional filters: `q`, `availability`, `closing_date_filter`, `estimated_cost_filter`, `category`, `province`, `city`, `organization`, `sector`, `source`, `department`, `closing_date_after`, `closing_date_before`, `bid_security_min`, `bid_security_max`, `estimated_value_min`, `estimated_value_max`, `tender_status`, `pec_category`, `eligible_only`, `sort`, `page`, `limit`
 - `GET /api/tenders/:id`
 - `POST /api/tenders/:id/save`
 - `POST /api/tenders/:id/reparse`

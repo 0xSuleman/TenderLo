@@ -1,13 +1,19 @@
 export const sourceRuntimeConfig = {
   maxLinksPerSourceRun: 50,
   politeRequestDelayMs: 750,
-  maxDocumentsPerTender: 10
+  publicPortalFrequencyMinutes: 15,
+  newspaperFrequencyMinutes: 1440,
+  maxDocumentsPerTender: 10,
+  pageFetchTimeoutMs: 15_000,
+  documentFetchTimeoutMs: 30_000
 } as const;
 
 export const parsingRuntimeConfig = {
   minPdfTextCharsBeforeOcr: 40,
   ocrTimeoutMs: 120_000,
+  ocrMaxPdfPages: 3,
   ocrMaxBufferBytes: 20 * 1024 * 1024,
+  tesseractLanguages: process.env.TENDERLO_TESSERACT_LANGUAGES ?? "eng+urd",
   confidence: {
     htmlSelector: 0.86,
     htmlGeneric: 0.72,

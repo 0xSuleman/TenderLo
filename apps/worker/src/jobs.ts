@@ -5,6 +5,7 @@ import {
   buildCanonicalTenderId,
   calculateDuplicateConfidence,
   classifyTender,
+  classifyTenderCategory,
   extractTenderFields,
   normalizeDepartment
 } from "@tenderlo/intelligence";
@@ -18,10 +19,12 @@ import {
   pipelineRuntimeConfig,
   safeJson,
   sourceRuntimeConfig,
+  PermanentSourceError,
   type ExtractedFieldResult,
+  type Json,
   type RawTenderPayload
 } from "@tenderlo/shared";
-import { createSourceContext, fetchBinary, getSourceAdapter } from "@tenderlo/sources";
+import { createSourceContext, fetchBinary, getSourceAdapter, isKnownSourceDomain, normalizeSourceHostname } from "@tenderlo/sources";
 
 export async function ingestAllDueSources(): Promise<void> {
   const supabase = createServiceClient();
@@ -96,6 +99,7 @@ export async function ingestSource(sourceId: string): Promise<void> {
       .eq("id", source.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown ingestion error";
+    const permanentFailure = error instanceof PermanentSourceError;
     const nextFailures = Number(source.consecutive_failures ?? 0) + 1;
     await supabase
       .from("ingestion_runs")
@@ -110,15 +114,15 @@ export async function ingestSource(sourceId: string): Promise<void> {
       .eq("id", run.id);
     await supabase
       .from("tender_sources")
-      .update({ status: nextFailures >= 3 ? "failing" : "active", consecutive_failures: nextFailures })
+      .update({ status: permanentFailure || nextFailures >= 3 ? "failing" : "active", consecutive_failures: nextFailures })
       .eq("id", source.id);
-    if (nextFailures >= 3) {
+    if (permanentFailure || nextFailures >= 3) {
       await createQaTask(supabase, {
         sourceId: source.id,
         taskType: "source_failure",
         priority: "high",
-        title: `${source.name} failed ${nextFailures} consecutive ingestion runs`,
-        details: safeJson({ error: message, source_id: source.id })
+        title: permanentFailure ? `${source.name} is not publicly accessible` : `${source.name} failed ${nextFailures} consecutive ingestion runs`,
+        details: safeJson({ error: message, source_id: source.id, permanent: permanentFailure })
       });
     }
     throw error;
@@ -193,7 +197,7 @@ export async function sendPendingAlerts(): Promise<void> {
 
 async function upsertTenderFromPayload(
   supabase: DatabaseClient,
-  source: { id: string; source_type: string; name: string },
+  source: { id: string; source_type: string; name: string; adapter_key?: string | null; metadata?: Json | null },
   payload: RawTenderPayload
 ): Promise<{ tenderId: string; created: boolean; duplicatesFound: number }> {
   const normalizedTitle = normalizeForSearch(payload.title);
@@ -206,8 +210,12 @@ async function upsertTenderFromPayload(
     closingDate: payload.closingDate ?? null
   });
   const classification = classifyTender({ title: payload.title, description: payload.description ?? null });
+  const procurementCategory = payload.procurementCategory ?? classifyTenderCategory({ title: payload.title, description: payload.description ?? null });
   const primarySector = classification.find((match) => match.isPrimary)?.sector ?? "uncategorized";
-  const extractionFields = extractTenderFields(`${payload.title}\n${payload.description ?? ""}`);
+  const extractionFields = [
+    ...extractTenderFields(`${payload.title}\n${payload.description ?? ""}`),
+    ...payloadMetadataFields(payload)
+  ];
   const derived = deriveTenderValues(payload, extractionFields);
   const extractionConfidence = extractionFields.length
     ? extractionFields.reduce((sum, field) => sum + field.confidenceScore, 0) / extractionFields.length
@@ -228,7 +236,7 @@ async function upsertTenderFromPayload(
           source_url: payload.sourceUrl,
           tender_number: payload.tenderNumber ?? null,
           department: normalizeDepartment(payload.department) ?? payload.department ?? null,
-          procurement_category: payload.procurementCategory ?? "works",
+          procurement_category: procurementCategory,
           sector: primarySector,
           province: payload.province ?? derived.province,
           city: payload.city ?? derived.city,
@@ -253,6 +261,7 @@ async function upsertTenderFromPayload(
 
   if (!tender) throw new Error("Tender upsert did not return a record.");
 
+  const sourceProvenance = buildSourceProvenance(source, payload);
   await supabase.from("tender_source_links").upsert(
     {
       tender_id: tender.id,
@@ -262,15 +271,26 @@ async function upsertTenderFromPayload(
         newspaperName: payload.newspaperName,
         publicationDate: payload.publicationDate,
         pageSection: payload.pageSection,
-        sourceType: source.source_type
+        sourceType: source.source_type,
+        ...sourceProvenance
       })
     },
     { onConflict: "tender_id,source_url" }
   );
+  if (sourceProvenance.originalSourceDomainKnown === false) {
+    await createQaTask(supabase, {
+      tenderId: tender.id,
+      sourceId: source.id,
+      taskType: "manual_verification",
+      priority: "medium",
+      title: `Unexpected source domain on ${source.name}`,
+      details: safeJson(sourceProvenance)
+    });
+  }
 
   await persistSectorMatches(supabase, tender.id, classification);
   await persistExtractedFields(supabase, tender.id, null, extractionFields);
-  await downloadAndParseDocuments(supabase, tender.id, payload);
+  await downloadAndParseDocuments(supabase, tender.id, payload, source);
 
   if (primarySector === "uncategorized") {
     await createQaTask(supabase, {
@@ -291,7 +311,14 @@ async function upsertTenderFromPayload(
   };
 }
 
-async function downloadAndParseDocuments(supabase: DatabaseClient, tenderId: string, payload: RawTenderPayload): Promise<void> {
+async function downloadAndParseDocuments(
+  supabase: DatabaseClient,
+  tenderId: string,
+  payload: RawTenderPayload,
+  source: { adapter_key?: string | null; metadata?: Json | null }
+): Promise<void> {
+  const sourceGroup = metadataString(payload.sourceGroup) ?? metadataString(sourceMetadataValue(source.metadata, "sourceGroup"));
+  const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? "tender_document";
   for (const document of payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)) {
     const fetched = await fetchBinary(document.url);
     if (!fetched.ok) {
@@ -307,7 +334,13 @@ async function downloadAndParseDocuments(supabase: DatabaseClient, tenderId: str
 
     const hash = sha256(fetched.buffer);
     const filename = document.filename ?? (basename(new URL(document.url).pathname) || "tender-document");
-    const storagePath = `${tenderId}/${hash}-${filename}`;
+    const storagePath = buildTenderDocumentStoragePath({
+      adapterKey: source.adapter_key ?? "unknown-source",
+      documentPrefix,
+      tenderId,
+      hash,
+      filename
+    });
     await supabase.storage.from("tender-documents").upload(storagePath, fetched.buffer, {
       contentType: fetched.contentType || document.mimeType || "application/octet-stream",
       upsert: true
@@ -323,6 +356,10 @@ async function downloadAndParseDocuments(supabase: DatabaseClient, tenderId: str
           original_filename: filename,
           mime_type: fetched.contentType || document.mimeType || "application/octet-stream",
           content_hash: hash,
+          source_group: sourceGroup ?? null,
+          document_prefix: documentPrefix,
+          source_document_key: document.sourceDocumentKey ?? null,
+          fetched_at: new Date().toISOString(),
           parser_status: "pending",
           ocr_status: "not_needed"
         },
@@ -374,6 +411,15 @@ async function downloadAndParseDocuments(supabase: DatabaseClient, tenderId: str
 
     const documentFields = extractTenderFields(mergeParsedPages(parsed.pages));
     await persistExtractedFields(supabase, tenderId, tenderDocument.id, documentFields);
+    if (payload.newspaperName && parsed.ocrStatus === "completed") {
+      await createQaTask(supabase, {
+        tenderId,
+        taskType: "manual_verification",
+        priority: "medium",
+        title: "OCR newspaper tender notice needs verification",
+        details: safeJson({ document_id: tenderDocument.id, newspaper: payload.newspaperName, confidence: parsed.pages[0]?.confidenceScore ?? null })
+      });
+    }
   }
 }
 
@@ -603,6 +649,98 @@ function deriveTenderValues(payload: RawTenderPayload, fields: ExtractedFieldRes
   }
   if (payload.publicationDate && !result.advertisement_date) result.advertisement_date = payload.publicationDate;
   return result;
+}
+
+function payloadMetadataFields(payload: RawTenderPayload): ExtractedFieldResult[] {
+  const fields: ExtractedFieldResult[] = [];
+  const evidence = normalizeWhitespace(`${payload.title}\n${payload.description ?? ""}`).slice(0, 500);
+  for (const [fieldName, fieldValue] of [
+    ["procurement_method", payload.procurementMethod],
+    ["submission_method", payload.submissionMethod],
+    ["contact_person", payload.contactPerson]
+  ] as const) {
+    if (!fieldValue) continue;
+    fields.push({
+      fieldName,
+      fieldValue,
+      sourceMethod: "html_selector",
+      confidenceScore: 0.82,
+      evidenceText: evidence || fieldValue,
+      verificationStatus: "unverified"
+    });
+  }
+  return fields;
+}
+
+export function buildSourceProvenance(
+  source: { adapter_key?: string | null; metadata?: Json | null },
+  payload: RawTenderPayload
+): Record<string, unknown> {
+  const knownSourceDomains = uniqueStrings([
+    ...metadataStringArray(sourceMetadataValue(source.metadata, "knownSourceDomains")),
+    ...metadataStringArray(sourceMetadataValue(payload.sourceMetadata, "knownSourceDomains"))
+  ]);
+  const originalSourceUrl = payload.originalSourceUrl ?? null;
+  const websiteUrl = payload.websiteUrl ?? null;
+  const originalSourceDomainKnown = originalSourceUrl ? isKnownSourceDomain(originalSourceUrl, knownSourceDomains) : null;
+  const websiteDomainKnown = websiteUrl ? isKnownSourceDomain(websiteUrl, knownSourceDomains) : null;
+  return {
+    adapterKey: source.adapter_key ?? metadataString(sourceMetadataValue(payload.sourceMetadata, "adapterKey")) ?? null,
+    sourceGroup: payload.sourceGroup ?? metadataString(sourceMetadataValue(source.metadata, "sourceGroup")) ?? null,
+    sourceLabel: payload.sourceLabel ?? null,
+    portalFamily: metadataString(sourceMetadataValue(payload.sourceMetadata, "portalFamily")) ?? metadataString(sourceMetadataValue(source.metadata, "portalFamily")) ?? null,
+    documentPrefix: metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? null,
+    sourceUrl: payload.sourceUrl,
+    sourceHost: normalizeSourceHostname(payload.sourceUrl),
+    originalSourceUrl,
+    originalSourceHost: normalizeSourceHostname(originalSourceUrl),
+    originalSourceDomainKnown,
+    websiteUrl,
+    websiteHost: normalizeSourceHostname(websiteUrl),
+    websiteDomainKnown,
+    knownSourceDomains,
+    documentUrlCount: payload.documents.length
+  };
+}
+
+export function buildTenderDocumentStoragePath(input: {
+  adapterKey: string;
+  documentPrefix: string;
+  tenderId: string;
+  hash: string;
+  filename: string;
+}): string {
+  return [
+    safePathSegment(input.adapterKey),
+    safePathSegment(input.documentPrefix),
+    input.tenderId,
+    `${input.hash}-${safePathSegment(input.filename)}`
+  ].join("/");
+}
+
+function sourceMetadataValue(metadata: Json | null | undefined, key: string): Json | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  return metadata[key];
+}
+
+function metadataString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function metadataStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim())) : [];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
+function safePathSegment(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[^\w.\-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 180) || "file";
 }
 
 function matchesSavedSearch(tender: any, search: any): boolean {

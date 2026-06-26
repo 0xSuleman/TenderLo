@@ -64,10 +64,11 @@ Tender intelligence is deterministic and evidence-backed. Hosted AI, hosted OCR,
 ## Tender Search
 
 - Public tender previews live at `/tenders`; authenticated contractor search lives at `/search`.
-- `GET /api/tenders` supports `q`, `province`, `city`, `sector`, `source`, `department`, `closing_date_after`, `closing_date_before`, `bid_security_min`, `bid_security_max`, `estimated_value_min`, `estimated_value_max`, `tender_status`, `pec_category`, `eligible_only`, `sort`, `page`, and `limit`.
+- `GET /api/tenders` supports primary filters for `availability`, `closing_date_filter`, `estimated_cost_filter`, `category`, `city`, `province`, and `organization`, plus compatible advanced filters such as `sector`, `source`, `department`, explicit closing-date/value ranges, `pec_category`, `eligible_only`, `sort`, `page`, and `limit`.
 - The API returns `{ data, pagination, meta }`, where `meta.planAccess` is `free`, `paid`, or `ops`.
-- Non-ops searches are forced to `status = published`. Free/public responses omit source URLs, tender values, bid security, document fees, and documents.
+- Non-ops searches are limited to public tender lifecycle states and default to active tenders. Free/public responses omit source URLs, tender values, bid security, document fees, and documents.
 - Search uses the generated Postgres `search_document` tsvector plus filter indexes on status/source/closing date, geography, sector, department, estimated value, bid security, PEC extracted fields, and recommendation status/score.
+- Procurement category filtering uses the controlled 55-category tender taxonomy, and province filtering uses the seven major Pakistan administrative regions.
 
 ## Frontend Experience
 

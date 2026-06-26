@@ -1,4 +1,4 @@
-import { buildCanonicalTenderId, classifyTender, normalizeDepartment } from "@tenderlo/intelligence";
+import { buildCanonicalTenderId, classifyTender, classifyTenderCategory, normalizeDepartment } from "@tenderlo/intelligence";
 import { normalizeForSearch, tenderManualSchema } from "@tenderlo/shared";
 import { created, fail, parseBody } from "@/lib/api";
 import { requireOpsAdmin } from "@/lib/supabase";
@@ -20,6 +20,7 @@ export async function POST(request: Request): Promise<Response> {
       manualSourceId = createdSource.id;
     }
     const classification = classifyTender({ title: input.title, description: input.description ?? null });
+    const procurementCategory = input.procurement_category ?? classifyTenderCategory({ title: input.title, description: input.description ?? null });
     const canonicalTenderId = buildCanonicalTenderId({
       sourceId: manualSourceId,
       sourceUrl: input.source_url ?? null,
@@ -36,6 +37,7 @@ export async function POST(request: Request): Promise<Response> {
         canonical_tender_id: canonicalTenderId,
         normalized_title: normalizeForSearch(input.title),
         department: normalizeDepartment(input.department) ?? input.department,
+        procurement_category: procurementCategory,
         sector: input.sector ?? classification[0]?.sector ?? "uncategorized",
         extraction_confidence: 1,
         is_human_verified: true

@@ -1,11 +1,11 @@
 import { FileSearch, Filter, Search, X } from "lucide-react";
-import { contractorSectors, pecCategories, pakistanProvinces, tenderSearchSchema } from "@tenderlo/shared";
+import { tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 import { AppShell } from "@/components/nav";
 import { MotionItem, MotionList, ScoreRing } from "@/components/motion";
 import { Badge, Button, Card, EmptyState, Field, Input, LinkButton, PageHeader, Select } from "@/components/ui";
 import { getPageContext } from "@/lib/page-context";
-import { formatCurrency, formatDate } from "@/lib/utils";
-import { hasActiveTenderPlan, listTenderSourceOptions, searchTenders, type TenderSearchResult, type TenderSourceOption } from "@/lib/tender-search";
+import { formatDate } from "@/lib/utils";
+import { hasActiveTenderPlan, listTenderFilterOptions, searchTenders, type TenderFilterOptions, type TenderSearchResult } from "@/lib/tender-search";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +20,30 @@ const sortOptions = [
   ["recommendation_score", "Recommendation score"]
 ] as const;
 
+const availabilityOptions = [
+  ["active", "Active Tenders"],
+  ["non_active", "Expired / Non-Active"],
+  ["all", "All Tenders"]
+] as const;
+
+const closingDateOptions = [
+  ["any", "Closing Date (Any)"],
+  ["today", "Today"],
+  ["tomorrow", "Tomorrow"],
+  ["next_3_days", "Next 3 Days"],
+  ["next_1_week", "Next 1 week"],
+  ["next_1_month", "Next 1 Month"]
+] as const;
+
+const estimatedCostOptions = [
+  ["any", "Estimated Cost (Any)"],
+  ["not_available", "Cost Not Available"],
+  ["under_10_lac", "Under 10 Lac"],
+  ["10_lac_50_lac", "10 Lac - 50 Lac"],
+  ["50_lac_1_crore", "50 Lac - 1 Crore"],
+  ["1_crore_plus", "1 Crore+"]
+] as const;
+
 export default async function SearchPage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }): Promise<JSX.Element> {
   const params = await searchParams;
   const parsed = tenderSearchSchema.safeParse(params);
@@ -32,10 +56,10 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
     pagination: { page: input.page, limit: input.limit, total: 0, totalPages: 0 },
     meta: { planAccess: "free", appliedFilters: {} }
   };
-  let sources: TenderSourceOption[] = [];
+  let filterOptions: TenderFilterOptions = { categories: [], cities: [], provinces: [], organizations: [], sources: [] };
 
   if (context) {
-    sources = await listTenderSourceOptions(context.admin);
+    filterOptions = await listTenderFilterOptions(context.admin);
     const hasPaidAccess = await hasActiveTenderPlan(context.admin, context.organizationId);
     result = await searchTenders(context.admin, input, {
       organizationId: context.organizationId,
@@ -46,7 +70,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
 
   return (
     <AppShell>
-      <PageHeader title="Tender Search" body="Search published tenders by keyword, geography, contractor sector, value, bid security, PEC requirement, source, and bid-readiness fit." />
+      <PageHeader title="Tender Search" body="Search TenderLo records by active availability, deadline urgency, cost range, category, geography, and issuing organization." />
       <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
         <Card>
           <form className="grid gap-4" method="get">
@@ -58,74 +82,47 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
             <Field label="Keyword">
               <Input name="q" defaultValue={input.q ?? ""} placeholder="Roads, HVAC, WASA" />
             </Field>
+            <Field label="Status">
+              <Select name="availability" defaultValue={input.availability}>
+                {availabilityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </Select>
+            </Field>
+            <Field label="Closing date">
+              <Select name="closing_date_filter" defaultValue={input.closing_date_filter}>
+                {closingDateOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </Select>
+            </Field>
+            <Field label="Estimated cost">
+              <Select name="estimated_cost_filter" defaultValue={input.estimated_cost_filter}>
+                {estimatedCostOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </Select>
+            </Field>
+            <Field label="Category">
+              <Select name="category" defaultValue={input.category ?? ""}>
+                <option value="">All Categories</option>
+                {filterOptions.categories.map((category) => <option key={category} value={category}>{category}</option>)}
+              </Select>
+            </Field>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <Field label="City">
+                <Select name="city" defaultValue={input.city ?? ""}>
+                  <option value="">All Cities</option>
+                  {filterOptions.cities.map((city) => <option key={city} value={city}>{city}</option>)}
+                </Select>
+              </Field>
               <Field label="Province">
                 <Select name="province" defaultValue={input.province ?? ""}>
-                  <option value="">All provinces</option>
-                  {pakistanProvinces.map((province) => <option key={province} value={province}>{province}</option>)}
+                  <option value="">All Provinces</option>
+                  {filterOptions.provinces.map((province) => <option key={province} value={province}>{province}</option>)}
                 </Select>
               </Field>
-              <Field label="City">
-                <Input name="city" defaultValue={input.city ?? ""} />
-              </Field>
             </div>
-            <Field label="Sector">
-              <Select name="sector" defaultValue={input.sector ?? ""}>
-                <option value="">All sectors</option>
-                {contractorSectors.map((sector) => <option key={sector} value={sector}>{sector.replaceAll("_", " ")}</option>)}
+            <Field label="Organization">
+              <Select name="organization" defaultValue={input.organization ?? input.department ?? ""}>
+                <option value="">All Organizations</option>
+                {filterOptions.organizations.map((organization) => <option key={organization} value={organization}>{organization}</option>)}
               </Select>
             </Field>
-            <Field label="Source">
-              <Select name="source" defaultValue={input.source ?? ""}>
-                <option value="">All sources</option>
-                {sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
-              </Select>
-            </Field>
-            <Field label="Department">
-              <Input name="department" defaultValue={input.department ?? ""} />
-            </Field>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <Field label="Closing after">
-                <Input name="closing_date_after" type="date" defaultValue={input.closing_date_after ?? ""} />
-              </Field>
-              <Field label="Closing before">
-                <Input name="closing_date_before" type="date" defaultValue={input.closing_date_before ?? ""} />
-              </Field>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <Field label="Estimated value min">
-                <Input name="estimated_value_min" type="number" min="0" defaultValue={input.estimated_value_min ?? ""} />
-              </Field>
-              <Field label="Estimated value max">
-                <Input name="estimated_value_max" type="number" min="0" defaultValue={input.estimated_value_max ?? ""} />
-              </Field>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <Field label="Bid security min">
-                <Input name="bid_security_min" type="number" min="0" defaultValue={input.bid_security_min ?? ""} />
-              </Field>
-              <Field label="Bid security max">
-                <Input name="bid_security_max" type="number" min="0" defaultValue={input.bid_security_max ?? ""} />
-              </Field>
-            </div>
-            <Field label="PEC category">
-              <Select name="pec_category" defaultValue={input.pec_category ?? ""}>
-                <option value="">Any PEC category</option>
-                {pecCategories.filter((category) => category !== "unknown").map((category) => <option key={category} value={category}>{category}</option>)}
-              </Select>
-            </Field>
-            {context?.isOps ? (
-              <Field label="Tender status">
-                <Select name="tender_status" defaultValue={input.tender_status}>
-                  <option value="published">Published</option>
-                  <option value="under_review">Under review</option>
-                  <option value="draft">Draft</option>
-                  <option value="corrigendum">Corrigendum</option>
-                  <option value="closed">Closed</option>
-                  <option value="cancelled">Cancelled</option>
-                </Select>
-              </Field>
-            ) : null}
             <Field label="Sort">
               <Select name="sort" defaultValue={input.sort}>
                 {sortOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -181,7 +178,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
             )}
             {result.data.length === 0 && context ? (
               <EmptyState
-                body="Try widening the date, value, PEC, or geography filters."
+                body="Try widening the status, deadline, cost, category, or geography filters."
                 icon={<FileSearch className="h-7 w-7" />}
                 title="No tenders match these filters"
               />
@@ -215,6 +212,8 @@ function TenderResultCard({ tender, fullAccess }: { tender: Record<string, unkno
         <div>
           <div className="mb-2 flex flex-wrap gap-2">
             <Badge tone={tender.status === "published" ? "good" : "warn"}>{String(tender.status ?? "unknown")}</Badge>
+            <Badge tone={tender.active_status === "Active" ? "good" : "warn"}>{String(tender.active_status ?? "Expired / Non-Active")}</Badge>
+            {tender.category ? <Badge>{String(tender.category)}</Badge> : null}
             {tender.sector ? <Badge>{String(tender.sector).replaceAll("_", " ")}</Badge> : null}
           </div>
           <h2 className="font-semibold">{String(tender.title ?? "Untitled tender")}</h2>
@@ -229,16 +228,20 @@ function TenderResultCard({ tender, fullAccess }: { tender: Record<string, unkno
       {typeof tender.preview === "string" && tender.preview ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{tender.preview}</p> : null}
       {fullAccess ? (
         <dl className="mt-4 grid gap-3 text-sm md:grid-cols-3">
-          <div><dt className="text-muted-foreground">Estimated value</dt><dd className="font-medium">{formatCurrency(tender.estimated_value as string | number | null | undefined)}</dd></div>
-          <div><dt className="text-muted-foreground">Bid security</dt><dd className="font-medium">{formatCurrency(tender.bid_security_amount as string | number | null | undefined)}</dd></div>
+          <div><dt className="text-muted-foreground">Estimated cost</dt><dd className="font-medium">{String(tender.estimated_cost ?? "Cost Not Available")}</dd></div>
+          <div><dt className="text-muted-foreground">Tender type</dt><dd className="font-medium">{String(tender.tender_type ?? "Needs review")}</dd></div>
           <div><dt className="text-muted-foreground">Tender number</dt><dd className="font-medium">{String(tender.tender_number ?? "Needs review")}</dd></div>
         </dl>
       ) : (
-        <p className="mt-4 text-sm text-muted-foreground">Value, bid security, source URL, and documents are available on paid plans after verification.</p>
+        <p className="mt-4 text-sm text-muted-foreground">Estimated cost, source URL, and documents are available on paid plans after verification.</p>
       )}
-      <LinkButton className="mt-4" href={`/tenders/${String(tender.id)}`}>Open tender</LinkButton>
+      <LinkButton className="mt-4" href={tenderHref(tender)}>Open tender</LinkButton>
     </Card>
   );
+}
+
+function tenderHref(tender: Record<string, unknown>): string {
+  return tenderDetailPath(String(tender.title ?? "tender"), String(tender.id));
 }
 
 function pageHref(path: string, params: Record<string, string | undefined>, page: number): string {
@@ -253,11 +256,15 @@ function pageHref(path: string, params: Record<string, string | undefined>, page
 function buildActiveFilters(params: Record<string, string | undefined>): Array<{ key: string; label: string; value: string }> {
   const labels: Record<string, string> = {
     q: "Keyword",
+    availability: "Status",
+    closing_date_filter: "Closing date",
+    estimated_cost_filter: "Estimated cost",
+    category: "Category",
     province: "Province",
     city: "City",
+    organization: "Organization",
+    department: "Organization",
     sector: "Sector",
-    source: "Source",
-    department: "Department",
     closing_date_after: "Closing after",
     closing_date_before: "Closing before",
     estimated_value_min: "Value min",

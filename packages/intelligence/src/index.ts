@@ -7,9 +7,11 @@ import {
   normalizeForSearch,
   normalizeWhitespace,
   pakistanProvinces,
+  tenderCategories,
   type ContractorSector,
   type DuplicateCandidateResult,
   type ExtractedFieldResult,
+  type TenderCategory,
   type SectorMatch
 } from "@tenderlo/shared";
 
@@ -64,6 +66,64 @@ const sectorKeywords: Record<ContractorSector, string[]> = {
   industrial_maintenance: ["industrial", "plant maintenance", "maintenance", "overhauling", "shutdown"],
   general_contracting: ["general contracting", "miscellaneous works", "repair and maintenance"],
   uncategorized: []
+};
+
+const categoryKeywords: Record<TenderCategory, string[]> = {
+  "Accommodation & Hospitality": ["hotel", "guest house", "accommodation", "lodging", "hospitality"],
+  "Advertising & Marketing": ["advertising", "marketing", "media campaign", "branding", "publicity"],
+  "Agricultural Supplies": ["agriculture", "seed", "fertilizer", "pesticide", "irrigation supplies"],
+  "Asset Disposal & Auction": ["auction", "disposal", "scrap sale", "obsolete", "asset disposal"],
+  "Audio Visual & Broadcasting": ["audio visual", "broadcast", "camera", "studio", "sound system"],
+  "Audit & Verification": ["audit", "verification", "third party validation", "inspection"],
+  "Building Maintenance": ["building maintenance", "repair", "renovation", "maintenance of building"],
+  "Catering & Food Services": ["catering", "food", "meal", "canteen", "refreshment"],
+  "Chemicals & Industrial Materials": ["chemical", "industrial material", "lubricant", "paint", "solvent"],
+  "Cleaning & Janitorial": ["cleaning", "janitorial", "sanitation services", "housekeeping"],
+  "Construction & Civil Works": ["construction", "civil work", "civil works", "masonry", "building work"],
+  "Consultancy Services": ["consultancy", "consultant", "feasibility", "supervision services", "advisory"],
+  "Cultural & Religious": ["cultural", "religious", "mosque", "heritage", "festival"],
+  "Defence & Military Supplies": ["defence", "defense", "military", "army", "navy", "air force"],
+  "Educational Supplies": ["educational supplies", "school supplies", "books", "classroom", "teaching aid"],
+  "Electrical Works & Equipment": ["electrical", "transformer", "substation", "wiring", "feeder", "lt", "ht"],
+  "Event Management": ["event", "conference", "seminar", "expo", "ceremony"],
+  "Facility Management": ["facility management", "operation and maintenance", "o&m", "facility services"],
+  "Financial & Insurance Services": ["insurance", "financial", "banking", "actuarial", "finance"],
+  "Furniture & Furnishings": ["furniture", "furnishing", "chairs", "tables", "fixture"],
+  "Hardware & Tools": ["hardware", "tools", "hand tools", "power tools", "fastener"],
+  "Human Resources & Recruitment": ["human resource", "recruitment", "manpower", "staffing", "outsourcing"],
+  "HVAC & Refrigeration": ["hvac", "air conditioning", "chiller", "refrigeration", "ventilation"],
+  "Industrial Equipment": ["industrial equipment", "industrial machinery", "plant equipment", "workshop equipment"],
+  "IT & Computer Equipment": ["computer", "laptop", "printer", "scanner", "it equipment", "desktop"],
+  "IT Services & Support": ["it services", "software", "network support", "maintenance support", "system support"],
+  "Laboratory Equipment & Services": ["laboratory", "lab equipment", "testing services", "lab supplies"],
+  "Landscaping & Horticulture": ["landscaping", "horticulture", "plants", "gardening", "green belt"],
+  "Legal & Judicial Services": ["legal", "judicial", "law firm", "advocate", "court"],
+  "Marine & Vessel Services": ["marine", "vessel", "boat", "ship", "port"],
+  "Mechanical Works & Equipment": ["mechanical", "pump", "boiler", "compressor", "mechanical works"],
+  "Medical & Surgical Supplies": ["medical supplies", "surgical supplies", "disposable", "syringe", "medicine supplies"],
+  "Medical Equipment": ["medical equipment", "x ray", "ultrasound", "ventilator", "hospital equipment"],
+  "Metals & Scrap": ["metal", "steel", "scrap", "iron", "aluminium"],
+  "Mining & Quarrying": ["mining", "quarry", "minerals", "aggregate extraction"],
+  "Miscellaneous": ["miscellaneous", "general item", "other items"],
+  "Office Equipment & Supplies": ["office equipment", "office supplies", "photocopier", "stationery item"],
+  "Pharmaceuticals": ["pharmaceutical", "medicine", "drug", "vaccine", "tablet"],
+  "Plant & Machinery": ["plant and machinery", "heavy machinery", "machinery", "excavator", "loader"],
+  "Plastics & Packaging": ["plastic", "packaging", "bags", "container", "wrapping"],
+  "Real Estate & Property": ["real estate", "property", "land", "lease", "rental"],
+  "Road & Infrastructure Works": ["road", "highway", "bridge", "culvert", "pavement", "infrastructure"],
+  "Scientific Instruments": ["scientific instrument", "instrument", "meter", "analyzer", "calibration"],
+  "Security & Safety Equipment": ["security", "safety equipment", "cctv", "fire alarm", "ppe"],
+  "Solar & Power Equipment": ["solar", "power equipment", "generator", "ups", "inverter"],
+  "Sports & Recreation": ["sports", "recreation", "playground", "gym", "sports goods"],
+  "Stationery & Printing": ["stationery", "printing", "print", "paper", "toner"],
+  "Telecommunication": ["telecommunication", "telecom", "fiber", "fibre", "tower"],
+  "Training & Education Services": ["training", "education services", "workshop", "capacity building"],
+  "Transportation & Logistics": ["transportation", "logistics", "vehicle rental", "freight", "carriage"],
+  "Uniforms & Textiles": ["uniform", "textile", "cloth", "fabric", "garment"],
+  "Vehicle Maintenance": ["vehicle maintenance", "repair of vehicle", "workshop", "oil change"],
+  "Vehicles & Auto Parts": ["vehicle", "auto parts", "spare parts", "tyre", "automobile"],
+  "Waste Management & Environment": ["waste management", "environment", "solid waste", "waste disposal"],
+  "Water Supply & Sanitation": ["water supply", "sanitation", "sewerage", "drainage", "tube well"]
 };
 
 const departmentAliases: Array<{ pattern: RegExp; normalized: string }> = [
@@ -295,6 +355,28 @@ export function classifyTender(input: { title: string; description?: string | nu
       isPrimary: true
     }
   ];
+}
+
+export function classifyTenderCategory(input: { title: string; description?: string | null; body?: string | null }): TenderCategory {
+  const title = normalizeForSearch(input.title);
+  const body = normalizeForSearch(`${input.description ?? ""} ${input.body ?? ""}`);
+  let bestCategory: TenderCategory = "Miscellaneous";
+  let bestScore = 0;
+
+  for (const category of tenderCategories) {
+    let score = 0;
+    for (const keyword of categoryKeywords[category]) {
+      const normalizedKeyword = normalizeForSearch(keyword);
+      if (title.includes(normalizedKeyword)) score += 3;
+      if (body.includes(normalizedKeyword)) score += 1;
+    }
+    if (score > bestScore) {
+      bestCategory = category;
+      bestScore = score;
+    }
+  }
+
+  return bestCategory;
 }
 
 export function calculateDuplicateConfidence(

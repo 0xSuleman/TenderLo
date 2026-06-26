@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { promisify } from "node:util";
@@ -7,6 +7,7 @@ import * as cheerio from "cheerio";
 import { logger, normalizeWhitespace, parsingRuntimeConfig, type ParseDocumentInput, type ParseDocumentResult, type ParsedDocumentPage } from "@tenderlo/shared";
 
 const execFileAsync = promisify(execFile);
+let availableTesseractLanguages: string[] | null = null;
 
 export async function parseDocument(input: ParseDocumentInput): Promise<ParseDocumentResult> {
   try {
@@ -20,7 +21,7 @@ export async function parseDocument(input: ParseDocumentInput): Promise<ParseDoc
       const parsed = await parsePdfDocument(input.buffer);
       if (parsed.pages.some((page) => page.text.length > parsingRuntimeConfig.minPdfTextCharsBeforeOcr)) return parsed;
       logger.info("PDF text extraction produced too little text; starting OCR fallback.", { sourceUrl: input.sourceUrl, filename: input.filename });
-      return runOcr(input);
+      return runPdfOcr(input);
     }
     if (isImage(input.mimeType, input.filename)) {
       return runOcr(input);
@@ -127,7 +128,8 @@ export async function runOcr(input: ParseDocumentInput): Promise<ParseDocumentRe
   try {
     await writeFile(inputPath, input.buffer);
     logger.info("Starting local Tesseract OCR.", { sourceUrl: input.sourceUrl, filename: input.filename });
-    const { stdout } = await execFileAsync("tesseract", [inputPath, "stdout", "-l", "eng"], {
+    const languages = await resolveTesseractLanguages(input);
+    const { stdout } = await execFileAsync("tesseract", [inputPath, "stdout", "-l", languages], {
       timeout: parsingRuntimeConfig.ocrTimeoutMs,
       maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
     });
@@ -172,6 +174,86 @@ export async function runOcr(input: ParseDocumentInput): Promise<ParseDocumentRe
   }
 }
 
+export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumentResult> {
+  const workdir = await mkdtemp(join(tmpdir(), "tenderlo-pdf-ocr-"));
+  const inputPath = join(workdir, "document.pdf");
+  const outputPrefix = join(workdir, "page");
+  try {
+    await writeFile(inputPath, input.buffer);
+    await execFileAsync(
+      "pdftoppm",
+      ["-f", "1", "-l", String(parsingRuntimeConfig.ocrMaxPdfPages), "-r", "200", "-png", inputPath, outputPrefix],
+      {
+        timeout: parsingRuntimeConfig.ocrTimeoutMs,
+        maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
+      }
+    );
+
+    const pageFiles = (await readdir(workdir))
+      .filter((file) => /^page-\d+\.png$/.test(file))
+      .sort((left, right) => Number(left.match(/\d+/)?.[0] ?? 0) - Number(right.match(/\d+/)?.[0] ?? 0));
+    if (pageFiles.length === 0) {
+      return {
+        parserStatus: "failed",
+        ocrStatus: "failed",
+        pageCount: 0,
+        pages: [],
+        errorMessage: "PDF OCR conversion produced no page images"
+      };
+    }
+
+    const languages = await resolveTesseractLanguages(input);
+    const pages: ParsedDocumentPage[] = [];
+    for (const [index, pageFile] of pageFiles.entries()) {
+      const pagePath = join(workdir, pageFile);
+      const { stdout } = await execFileAsync("tesseract", [pagePath, "stdout", "-l", languages], {
+        timeout: parsingRuntimeConfig.ocrTimeoutMs,
+        maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
+      });
+      const text = normalizeWhitespace(stdout);
+      if (!text) continue;
+      pages.push({
+        pageNumber: index + 1,
+        text,
+        extractionMethod: "ocr",
+        confidenceScore: parsingRuntimeConfig.confidence.ocrFallback
+      });
+    }
+
+    if (pages.length === 0) {
+      return {
+        parserStatus: "failed",
+        ocrStatus: "failed",
+        pageCount: pageFiles.length,
+        pages: [],
+        errorMessage: "Tesseract completed but returned no OCR text"
+      };
+    }
+
+    return {
+      parserStatus: "parsed",
+      ocrStatus: "completed",
+      pageCount: pageFiles.length,
+      pages
+    };
+  } catch (error) {
+    logger.error("Local PDF OCR failed.", {
+      sourceUrl: input.sourceUrl,
+      filename: input.filename,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return {
+      parserStatus: "failed",
+      ocrStatus: "failed",
+      pageCount: 0,
+      pages: [],
+      errorMessage: error instanceof Error ? error.message : "PDF OCR failed"
+    };
+  } finally {
+    await rm(workdir, { recursive: true, force: true });
+  }
+}
+
 export function mergeParsedPages(pages: ParsedDocumentPage[]): string {
   return normalizeWhitespace(
     pages
@@ -179,6 +261,45 @@ export function mergeParsedPages(pages: ParsedDocumentPage[]): string {
       .map((page) => page.text)
       .join("\n\n")
   );
+}
+
+async function resolveTesseractLanguages(input: ParseDocumentInput): Promise<string> {
+  const requested = parsingRuntimeConfig.tesseractLanguages.split("+").map((language) => language.trim()).filter(Boolean);
+  const available = await listTesseractLanguages();
+  const usable = requested.filter((language) => available.includes(language));
+  if (usable.length === requested.length && usable.length > 0) return usable.join("+");
+  if (usable.length > 0) {
+    logger.warn("Some configured Tesseract languages are not installed; using available subset.", {
+      sourceUrl: input.sourceUrl,
+      filename: input.filename,
+      requested: parsingRuntimeConfig.tesseractLanguages,
+      using: usable.join("+")
+    });
+    return usable.join("+");
+  }
+  if (available.includes("eng")) {
+    logger.warn("Configured Tesseract languages are not installed; falling back to eng.", {
+      sourceUrl: input.sourceUrl,
+      filename: input.filename,
+      requested: parsingRuntimeConfig.tesseractLanguages
+    });
+    return "eng";
+  }
+  return parsingRuntimeConfig.tesseractLanguages;
+}
+
+async function listTesseractLanguages(): Promise<string[]> {
+  if (availableTesseractLanguages) return availableTesseractLanguages;
+  try {
+    const { stdout, stderr } = await execFileAsync("tesseract", ["--list-langs"], { timeout: 5_000 });
+    availableTesseractLanguages = `${stdout}\n${stderr}`
+      .split(/\r?\n/g)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.toLowerCase().startsWith("list of available languages"));
+  } catch {
+    availableTesseractLanguages = [];
+  }
+  return availableTesseractLanguages;
 }
 
 function splitPdfTextIntoPages(text: string): ParsedDocumentPage[] {
