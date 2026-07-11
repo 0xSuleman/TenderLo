@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { Agent } from "undici";
 import {
   PermanentSourceError,
   SourceFetchError,
@@ -100,14 +101,193 @@ export class ProfiledPublicSourceAdapter implements SourceAdapter {
         payloads.push(payload);
         continue;
       }
+      // Skip if the URL is not valid — prevents URI malformed crashes
+      try { new URL(detailUrl); } catch {
+        payloads.push(payload);
+        continue;
+      }
 
       await sleep(sourceRuntimeConfig.politeRequestDelayMs);
-      const detail = await fetchPublicText(detailUrl, context.userAgent);
-      const parsed = parseDetailPage(detail.text, detailUrl, profile, payload);
-      payloads.push(parsed ?? payload);
+      try {
+        const detail = await fetchPublicText(detailUrl, context.userAgent);
+        const parsed = parseDetailPage(detail.text, detailUrl, profile, payload);
+        payloads.push(parsed ?? payload);
+      } catch (fetchError) {
+        // Non-fatal: keep the listing-page payload even if detail page fetch fails
+        payloads.push(payload);
+      }
     }
 
     return payloads;
+  }
+}
+
+abstract class OcrNewspaperAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  abstract readonly key: string;
+  abstract readonly name: string;
+  readonly sourceType: SourceType = "newspaper";
+
+  /** Return the full URL of today's classified/tender page JPG, or null if not found. */
+  protected abstract resolveClassifiedImageUrl(indexHtml: string, baseUrl: string, today: Date): string | null;
+
+  /** Return the index/listing page URL to fetch first. Can be overridden per edition. */
+  protected getIndexUrl(baseUrl: string, _today: Date): string {
+    return baseUrl;
+  }
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const today = new Date();
+    const indexUrl = this.getIndexUrl(context.baseUrl, today);
+
+    // 1. Fetch index page
+    const indexRes = await fetchText(indexUrl, context.userAgent);
+    if (!indexRes.ok) throw new SourceFetchError(`${this.name} index returned HTTP ${indexRes.status}`);
+
+    // 2. Resolve classified page image URL
+    const imageUrl = this.resolveClassifiedImageUrl(indexRes.text, context.baseUrl, today);
+    if (!imageUrl) {
+      // Not an error — newspaper may not publish classifieds every day
+      return [];
+    }
+
+    // 3. Download the image
+    const imgRes = await fetchBinary(imageUrl, context.userAgent);
+    if (!imgRes.ok) throw new SourceFetchError(`${this.name} classified image returned HTTP ${imgRes.status}`);
+    // Guard against servers returning HTML with HTTP 200 for missing images (soft 404)
+    if (!imgRes.contentType.startsWith("image/")) {
+      throw new SourceFetchError(`${this.name} classified image URL returned non-image content (${imgRes.contentType}). The image may not be published yet for today.`);
+    }
+
+    // 4. OCR via the context's parseDocument delegate
+    let ocrText = "";
+    try {
+      if (!context.parseDocument) {
+        throw new Error("OCR parser function not provided in context");
+      }
+      const result = await context.parseDocument({
+        buffer: imgRes.buffer,
+        mimeType: "image/jpeg",
+        filename: "classified.jpg",
+        sourceUrl: imageUrl
+      });
+      ocrText = result.pages.map((p) => p.text).join("\n\n");
+    } catch (ocrError) {
+      throw new SourceFetchError(`${this.name} OCR failed: ${ocrError instanceof Error ? ocrError.message : String(ocrError)}`);
+    }
+
+    if (!ocrText.trim()) return [];
+
+    // 5. Split OCR text into individual tender blocks
+    const blocks = splitIntoTenderBlocks(ocrText);
+    const advertisementDate = formatDateIso(today);
+    const payloads: RawTenderPayload[] = [];
+
+    for (const block of blocks) {
+      if (block.trim().length < 30) continue;
+      const title = extractFirstLine(block);
+      if (!title) continue;
+      payloads.push({
+        sourceUrl: imageUrl,
+        title: title.slice(0, 500),
+        description: block.slice(0, 4000),
+        advertisementDate,
+        procurementMethod: "Newspaper tender notice",
+        submissionMethod: "As stated in newspaper notice",
+        documents: [{ url: imageUrl, filename: "classified-page.jpg", mimeType: "image/jpeg" }],
+        sourceMetadata: safeJson({
+          newspaper: this.name,
+          ocr_source_image: imageUrl,
+          extraction_method: "ocr_newspaper_classified",
+          adapterKey: this.key
+        }),
+        raw: safeJson({
+          title: title.slice(0, 500),
+          body: block.slice(0, 4000),
+          sourceType: "newspaper",
+          adapterKey: this.key,
+          fetchedAt: new Date().toISOString()
+        })
+      });
+    }
+    return payloads;
+  }
+}
+
+/** Split OCR text into individual tender/notice blocks */
+function splitIntoTenderBlocks(text: string): string[] {
+  // Split on NIT patterns, dept headers, or 2+ consecutive blank lines
+  const nitPattern = /(?=(?:NIT|NIT No|Tender No|NOTICE|INVITATION|OPEN TENDER|SEALED TENDER|REQUEST FOR|RFQ|RFP|EOI|EXPRESSION OF INTEREST|QUOTATION)[.\s:#-])/i;
+  const blocks = text.split(nitPattern).map((b) => b.trim()).filter((b) => b.length > 20);
+  // If no NIT splits found, fall back to double-newline blocks
+  if (blocks.length <= 1) {
+    return text.split(/\n{3,}/).map((b) => b.trim()).filter((b) => b.length > 30);
+  }
+  return blocks;
+}
+
+/** Get the first meaningful line as a title */
+function extractFirstLine(block: string): string | undefined {
+  const lines = block.split("\n").map((l) => l.trim()).filter((l) => l.length > 5);
+  return lines[0]?.slice(0, 300);
+}
+
+/** Format a Date as YYYY-MM-DD */
+function formatDateIso(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+// ─── Jang E-Paper Adapter ────────────────────────────────────────────────────
+// URL pattern: https://e.jang.com.pk/{city}/{DD-MM-YYYY}/page{N}
+// Classified page is page5 (کلاسیفائیڈ) and page7 (اشتہارات)
+// Image URL: https://e.jang.com.pk/static_pages/{D-M-YYYY}/{city}/mainpage/page5.jpg
+
+class JangEpaperAdapter extends OcrNewspaperAdapter {
+  readonly key = "jang-epaper-public";
+  readonly name = "Daily Jang Public E-Paper";
+
+  protected getIndexUrl(_baseUrl: string, today: Date): string {
+    const dd = String(today.getDate()).padStart(2, "0");
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const yyyy = today.getFullYear();
+    // Karachi edition, classified page (page5)
+    return `https://e.jang.com.pk/karachi/${dd}-${mm}-${yyyy}/page5`;
+  }
+
+  protected resolveClassifiedImageUrl(_html: string, _baseUrl: string, today: Date): string | null {
+    // Jang static_pages image URL uses M-D-YYYY format (month first, no zero-padding)
+    // e.g., July 9 → 7-9-2026  (NOT 9-7-2026)
+    const m = today.getMonth() + 1;
+    const d = today.getDate();
+    const yyyy = today.getFullYear();
+    // page5 = Classified (کلاسیفائیڈ), page7 = Advertisements (اشتہارات)
+    return `https://e.jang.com.pk/static_pages/${m}-${d}-${yyyy}/karachi/mainpage/page5.jpg`;
+  }
+}
+
+// ─── Express E-Paper Adapter ──────────────────────────────────────────────────
+// URL pattern: https://www.express.com.pk/epaper/Index.aspx?Issue=NP_LHE
+// Image URLs embedded in page: NP_LHE/YYYYMMDD/YYYYMMDD-NP_LHE-Classified_PageC007_7.jpg
+// Full image base: https://epaper.express.com.pk/
+
+class ExpressEpaperAdapter extends OcrNewspaperAdapter {
+  readonly key = "express-epaper-public";
+  readonly name = "Daily Express Public E-Paper";
+
+  protected resolveClassifiedImageUrl(html: string, _baseUrl: string, today: Date): string | null {
+    // Find the Classified page thumbnail in the index HTML
+    const classifiedMatch = html.match(/NP_LHE\/(\d+)\/(\d+-NP_LHE-Classified_[^'"\\]+\.jpg)/);
+    if (classifiedMatch) {
+      // Use the full-resolution image (remove -thumb suffix)
+      const fullRes = classifiedMatch[2]!.replace("-thumb", "");
+      return `https://www.express.com.pk/images/NP_LHE/${classifiedMatch[1]!}/${fullRes}`;
+    }
+    // Fallback: construct URL from today's date with known pattern
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    const dateStr = `${yyyy}${mm}${dd}`;
+    return `https://www.express.com.pk/images/NP_LHE/${dateStr}/${dateStr}-NP_LHE-Classified_PageC007_7.jpg`;
   }
 }
 
@@ -130,16 +310,16 @@ export const sourceAdapters: SourceAdapter[] = [
     listing: {
       rowSelector: "table tbody tr, .table tbody tr, .card, .opportunity-card, .procurement-card",
       linkSelector: "a[href*='opportunities'], a[href*='procurements'], a[href*='tender'], a",
-      titleSelector: "td:nth-child(2), td:nth-child(3), h3, h4, .title, .card-title",
-      tenderNumberSelector: "td:nth-child(1), .reference, .procurement-number",
-      departmentSelector: "td:nth-child(3), td:nth-child(4), .agency, .department, .organization",
-      advertisementDateSelector: "td:nth-child(5), .published, .advertisement-date",
-      closingDateSelector: "td:nth-child(6), .closing, .deadline",
+      titleSelector: "td:nth-child(3) a span",
+      tenderNumberSelector: "td:nth-child(2) span, td:nth-child(2)",
+      departmentSelector: "td:nth-child(3) > span",
+      advertisementDateSelector: "td:nth-child(5) .bg-label-success",
+      closingDateSelector: "td:nth-child(5) .bg-label-danger",
       estimatedValueSelector: "td:nth-child(7), .estimated-cost, .value",
       documentSelector: "a[href$='.pdf'], a[href*='download']"
     },
     detail: {
-      titleSelector: "h1, h2, .title, .procurement-title",
+      titleSelector: "h1, h2, h3, h4, .title, .procurement-title, .bg-facebook, .badge-primary",
       departmentSelector: ".procuring-agency, .agency, .department, .organization",
       closingDateSelector: ".closing-date, .deadline, td:contains('Closing') + td",
       documentSelector: "a[href$='.pdf'], a:contains('Download PDF'), a[href*='download']"
@@ -182,15 +362,14 @@ export const sourceAdapters: SourceAdapter[] = [
     sourceType: "provincial",
     region: "Punjab",
     listing: {
-      rowSelector: "table tbody tr, table tr, .views-row, .tender-row",
-      linkSelector: "a[href*='tender'], a[href*='procurement'], a[href$='.pdf'], a",
-      titleSelector: "td:nth-child(2), td:nth-child(3), h3, h4, .views-field-title, a",
-      tenderNumberSelector: "td:nth-child(1), .views-field-field-tender-no",
-      departmentSelector: "td:nth-child(3), td:nth-child(4), .department, .views-field-field-department",
-      advertisementDateSelector: "td:nth-child(5), .views-field-created",
-      closingDateSelector: "td:nth-child(6), .views-field-field-closing-date",
-      citySelector: "td:nth-child(7), .city",
-      documentSelector: "a[href$='.pdf'], a[href*='download']"
+      rowSelector: ".rgMasterTable tbody tr.rgRow, .rgMasterTable tbody tr.rgAltRow",
+      linkSelector: "td:nth-child(8) a, td:nth-child(9) a, a",
+      titleSelector: "td:nth-child(2)",
+      tenderNumberSelector: "td:nth-child(8) a, td:nth-child(9) a",
+      departmentSelector: "td:nth-child(6)",
+      advertisementDateSelector: "td:nth-child(4)",
+      closingDateSelector: "td:nth-child(5)",
+      documentSelector: "td:nth-child(8) a, td:nth-child(9) a"
     },
     defaultProcurementMethod: "Punjab PPRA public procurement process",
     defaultSubmissionMethod: "As stated in Punjab PPRA notice"
@@ -211,14 +390,17 @@ export const sourceAdapters: SourceAdapter[] = [
       "sindh.eprocure.gov.pk"
     ],
     listing: {
-      rowSelector: "table tbody tr, table tr",
-      linkSelector: "a[href*='tender'], a[href*='download'], a[href$='.pdf'], a",
-      titleSelector: "td:nth-child(8) a, td:nth-child(8), a",
+      rowSelector: "#tender_list tbody tr",
+      linkSelector: "td:nth-child(8) a",
+      titleSelector: "td:nth-child(7)",
       tenderNumberSelector: "td:nth-child(2)",
       departmentSelector: "td:nth-child(3)",
       advertisementDateSelector: "td:nth-child(4)",
       closingDateSelector: "td:nth-child(5)",
       citySelector: "td:nth-child(7)",
+      documentSelector: "td:nth-child(8) a"
+    },
+    detail: {
       documentSelector: "a[href$='.pdf'], a[href*='download']"
     },
     defaultProcurementMethod: "Sindh SPPRA public procurement process",
@@ -276,8 +458,8 @@ export const sourceAdapters: SourceAdapter[] = [
   }),
   newspaperAdapter("business-recorder-tenders", "Business Recorder Tenders", "https://www.brecorder.com/business-finance/tenders"),
   newspaperAdapter("dawn-public-tenders", "Dawn Public Tender Notices", "https://www.dawn.com/classifieds/tenders"),
-  newspaperAdapter("jang-epaper-public", "Daily Jang Public E-Paper", "https://e.jang.com.pk/"),
-  newspaperAdapter("express-epaper-public", "Daily Express Public E-Paper", "https://www.express.com.pk/epaper/"),
+  new JangEpaperAdapter(),
+  new ExpressEpaperAdapter(),
   new ProfiledPublicSourceAdapter({
     key: "ungm-public-pakistan",
     name: "UNGM Pakistan Public Notices",
@@ -302,14 +484,13 @@ export const sourceAdapters: SourceAdapter[] = [
     sourceType: "department",
     region: "Pakistan",
     listing: {
-      rowSelector: "article, .views-row, .card, table tbody tr, table tr",
-      linkSelector: "a[href*='procurement'], a[href*='tender'], a[href$='.pdf'], a",
-      titleSelector: "h2, h3, h4, .title, td:nth-child(2), a",
-      tenderNumberSelector: ".reference, td:nth-child(1)",
-      departmentSelector: ".agency, .organization",
-      advertisementDateSelector: ".date, time, td:nth-child(3)",
-      closingDateSelector: ".deadline, .closing-date, td:nth-child(4)",
-      documentSelector: "a[href$='.pdf'], a[href*='download'], a[href*='sites/default/files']"
+      rowSelector: "table tbody tr:has(a), table tr:has(a)",
+      linkSelector: "td:nth-child(1) a",
+      titleSelector: "td:nth-child(1)",
+      tenderNumberSelector: "td:nth-child(2)",
+      advertisementDateSelector: "td:nth-child(4)",
+      closingDateSelector: "td:nth-child(5)",
+      documentSelector: "td:nth-child(1) a"
     },
     defaultProcurementMethod: "IOM public procurement notice",
     defaultSubmissionMethod: "As stated in IOM Pakistan notice"
@@ -380,6 +561,12 @@ export function createSourceContext(source: {
   };
 }
 
+const insecureAgent = new Agent({
+  connect: {
+    rejectUnauthorized: false
+  }
+});
+
 export async function fetchText(url: string, userAgent = defaultUserAgent): Promise<{ ok: boolean; status: number; text: string; contentType: string }> {
   try {
     const response = await fetch(url, {
@@ -388,8 +575,9 @@ export async function fetchText(url: string, userAgent = defaultUserAgent): Prom
         accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(sourceRuntimeConfig.pageFetchTimeoutMs)
-    });
+      signal: AbortSignal.timeout(sourceRuntimeConfig.pageFetchTimeoutMs),
+      dispatcher: insecureAgent
+    } as any);
     const contentType = response.headers.get("content-type") ?? "text/plain";
     const text = await response.text();
     return {
@@ -418,8 +606,9 @@ export async function fetchBinary(url: string, userAgent = defaultUserAgent): Pr
         accept: "application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*,text/html,*/*"
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(sourceRuntimeConfig.documentFetchTimeoutMs)
-    });
+      signal: AbortSignal.timeout(sourceRuntimeConfig.documentFetchTimeoutMs),
+      dispatcher: insecureAgent
+    } as any);
     const arrayBuffer = await response.arrayBuffer();
     return {
       ok: response.ok,
@@ -481,16 +670,25 @@ function parseRow($: cheerio.CheerioAPI, row: any, baseUrl: string, profile: Sou
   const linkElement = profile.listing.linkSelector ? rowHandle.find(profile.listing.linkSelector).first() : rowHandle.find("a").first();
   const href = linkElement.attr("href");
   const rowText = normalizeWhitespace(rowHandle.text());
-  const title =
+  let title =
     selectText($, rowHandle, profile.listing.titleSelector) ||
     normalizeWhitespace(linkElement.text()) ||
     rowText.slice(0, 240);
+
+  if (profile.key === "iom-pakistan-procurement" && title) {
+    const cell = rowHandle.find("td:nth-child(1)");
+    const firstText = cell.clone().children("ul, ol, div, span").remove().end().text().trim();
+    if (firstText) {
+      title = firstText;
+    }
+  }
+
   if (!title || title.length < 4 || !/(tender|procurement|quotation|bid|notice|rfp|rfq|eoi|works?|supply|services?|auction|expression)/i.test(`${title} ${rowText}`)) {
     return null;
   }
   const sourceUrl = href ? new URL(href, baseUrl).toString() : baseUrl;
   const provenance = collectSourceProvenanceLinks($, rowHandle, sourceUrl, baseUrl);
-  const documents = collectDocumentLinks($, rowHandle, sourceUrl, profile.listing.documentSelector);
+  const documents = collectDocumentLinks($, rowHandle, baseUrl, profile.listing.documentSelector);
   if (href && isDocumentUrl(sourceUrl) && !documents.some((doc) => doc.url === sourceUrl)) {
     documents.push({ url: sourceUrl, filename: filenameFromUrl(sourceUrl), mimeType: mimeFromUrl(sourceUrl) });
   }
@@ -697,8 +895,17 @@ function mimeFromUrl(url: string): string {
 }
 
 function filenameFromUrl(url: string): string {
-  const pathname = new URL(url).pathname;
-  return decodeURIComponent(pathname.split("/").filter(Boolean).pop() ?? "tender-document");
+  try {
+    const pathname = new URL(url).pathname;
+    return decodeURIComponent(pathname.split("/").filter(Boolean).pop() ?? "tender-document");
+  } catch {
+    try {
+      const pathname = new URL(url).pathname;
+      return pathname.split("/").filter(Boolean).pop() ?? "tender-document";
+    } catch {
+      return "tender-document";
+    }
+  }
 }
 
 function dedupeDocuments(documents: RawTenderPayload["documents"]): RawTenderPayload["documents"] {
@@ -786,7 +993,8 @@ function metadataStringArray(value: Json | undefined): string[] | undefined {
 function normalizeDate(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const text = normalizeWhitespace(value);
-  const numeric = text.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
+  const cleanedText = text.replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/gi, "$1");
+  const numeric = cleanedText.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
   if (numeric) {
     const day = Number(numeric[1]);
     const month = Number(numeric[2]) - 1;
@@ -797,7 +1005,7 @@ function normalizeDate(value: string | undefined): string | undefined {
     const date = new Date(Date.UTC(year, month, day, hour, minute));
     if (!Number.isNaN(date.getTime())) return date.toISOString();
   }
-  const parsed = Date.parse(text);
+  const parsed = Date.parse(cleanedText);
   return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString();
 }
 

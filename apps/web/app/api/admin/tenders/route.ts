@@ -13,7 +13,9 @@ export async function POST(request: Request): Promise<Response> {
     if (!manualSourceId) {
       const { data: createdSource, error: sourceError } = await admin
         .from("tender_sources")
-        .insert({ name: "Manual Tender Entry", base_url: "https://tenderlo.local/manual", source_type: "manual", adapter_key: "manual", status: "active" })
+        // CRIT-06: status must be "disabled" — there is no "manual" source adapter, so if the worker
+        // picked this up as "active" it would call getSourceAdapter("manual") and crash.
+        .insert({ name: "Manual Tender Entry", base_url: "https://tenderlo.local/manual", source_type: "manual", adapter_key: "manual", status: "disabled" })
         .select("id")
         .single();
       if (sourceError) throw sourceError;

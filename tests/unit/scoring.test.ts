@@ -25,7 +25,7 @@ const tender: TenderScoringInput = {
   sector: "roads",
   province: "Punjab",
   city: "Lahore",
-  closingDate: "2026-06-20T10:00:00.000Z",
+  closingDate: "2027-01-20T10:00:00.000Z",
   estimatedValue: 150_000_000,
   extractedRequirements: { pec_category: "C-4" }
 };

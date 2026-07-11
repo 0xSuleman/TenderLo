@@ -43,7 +43,11 @@ export class PayFastBillingProvider implements BillingProvider {
   async verifyWebhook(payload: Record<string, string>): Promise<BillingWebhookResult> {
     const providedSignature = payload.signature;
     if (!providedSignature) throw new ValidationError("PayFast webhook signature is missing.");
-    const expectedSignature = createPayFastSignature(payload);
+    // HIGH-01: PayFast ITN signature is computed over the POST body parameter order, not alphabetical order.
+    // We must reproduce the exact parameter order from the original POST body.
+    // Since we receive the payload as an already-parsed object (order preserved by URLSearchParams in the route),
+    // we recreate the signature using the original insertion order of keys.
+    const expectedSignature = createPayFastSignatureOrdered(payload);
     if (providedSignature !== expectedSignature) throw new ValidationError("PayFast webhook signature verification failed.");
 
     const paymentStatus = (payload.payment_status ?? payload.status ?? "").toLowerCase();
@@ -68,7 +72,20 @@ export function createPayFastProvider(): BillingProvider {
 function createPayFastSignature(payload: Record<string, string>): string {
   const entries = Object.entries(payload)
     .filter(([key, value]) => key !== "signature" && value !== "")
-    .sort(([left], [right]) => left.localeCompare(right));
+    // MED-03: use deterministic ASCII comparison instead of locale-sensitive localeCompare
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const query = new URLSearchParams(entries).toString();
+  const passphrase = process.env.PAYFAST_PASSPHRASE;
+  const signed = passphrase ? `${query}&passphrase=${encodeURIComponent(passphrase)}` : query;
+  return createHash("md5").update(signed).digest("hex");
+}
+
+/**
+ * HIGH-01: For ITN verification, PayFast signs parameters in the original POST body order.
+ * This function preserves key insertion order (as parsed by URLSearchParams in the route handler).
+ */
+function createPayFastSignatureOrdered(payload: Record<string, string>): string {
+  const entries = Object.entries(payload).filter(([key, value]) => key !== "signature" && value !== "");
   const query = new URLSearchParams(entries).toString();
   const passphrase = process.env.PAYFAST_PASSPHRASE;
   const signed = passphrase ? `${query}&passphrase=${encodeURIComponent(passphrase)}` : query;

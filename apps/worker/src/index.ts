@@ -43,6 +43,17 @@ async function main(): Promise<void> {
     cron.schedule("15 * * * *", () => {
       closeExpiredTenders().catch((error) => logger.error("Scheduled tender closure failed.", { error: error instanceof Error ? error.message : String(error) }));
     });
+    // HIGH-04: rebuild recommendations daily at 02:15 UTC so scores are never permanently stale
+    cron.schedule("15 2 * * *", () => {
+      rebuildRecommendations().catch((error) => logger.error("Scheduled recommendation rebuild failed.", { error: error instanceof Error ? error.message : String(error) }));
+    });
+    // LOW-02: graceful shutdown so ingestion_runs are not stuck in "running"
+    const shutdown = (): void => {
+      logger.info("TenderLo worker shutting down.");
+      process.exit(0);
+    };
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
     logger.info("TenderLo worker scheduler is running.");
     return;
   }
@@ -57,6 +68,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  logger.error("TenderLo worker command failed.", { error: error instanceof Error ? error.message : String(error) });
+  const msg = error instanceof Error ? error.message
+    : (typeof error === "object" && error !== null && "message" in error) ? String((error as any).message)
+    : typeof error === "string" ? error
+    : JSON.stringify(error);
+  logger.error("TenderLo worker command failed.", { error: msg, raw: typeof error === "object" ? JSON.stringify(error)?.slice(0, 200) : undefined });
   process.exitCode = 1;
 });

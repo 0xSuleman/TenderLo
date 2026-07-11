@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+const root = "/Users/macbookpro/Desktop/TenderLo";
+
 export default defineConfig({
   test: {
     globals: true,
@@ -11,10 +13,13 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@tenderlo/shared": "/home/suleman-ahmed/Documents/TenderLo/packages/shared/src/index.ts",
-      "@tenderlo/intelligence": "/home/suleman-ahmed/Documents/TenderLo/packages/intelligence/src/index.ts",
-      "@tenderlo/scoring": "/home/suleman-ahmed/Documents/TenderLo/packages/scoring/src/index.ts",
-      "@tenderlo/parsing": "/home/suleman-ahmed/Documents/TenderLo/packages/parsing/src/index.ts"
+      "@tenderlo/shared": `${root}/packages/shared/src/index.ts`,
+      "@tenderlo/intelligence": `${root}/packages/intelligence/src/index.ts`,
+      "@tenderlo/scoring": `${root}/packages/scoring/src/index.ts`,
+      "@tenderlo/parsing": `${root}/packages/parsing/src/index.ts`,
+      "@tenderlo/sources": `${root}/packages/sources/src/index.ts`,
+      "@tenderlo/db": `${root}/packages/db/src/index.ts`,
+      "@tenderlo/notifications": `${root}/packages/notifications/src/index.ts`,
     }
   }
 });

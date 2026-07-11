@@ -482,6 +482,7 @@ export interface SourceAdapterContext {
   adapterKey: string;
   userAgent: string;
   metadata?: Json | undefined;
+  parseDocument?: (input: ParseDocumentInput) => Promise<ParseDocumentResult>;
 }
 
 export interface SourceAdapter {

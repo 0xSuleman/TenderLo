@@ -107,7 +107,9 @@ export const billingRuntimeConfig = {
   planPricesPkr: {
     starter: 4500,
     growth: 14500,
-    pro: 34500
+    pro: 34500,
+    // HIGH-02: enterprise is billed via manual invoice; price 0 prevents TypeError on .toFixed(2)
+    enterprise: 0
   },
   defaultSubscriptionPeriodDays: 30
 } as const;
