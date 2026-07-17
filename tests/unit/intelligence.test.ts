@@ -4,6 +4,8 @@ import {
   calculateDuplicateConfidence,
   classifyTender,
   detectGeography,
+  extractKpPpraNoticeFields,
+  extractPunjabPpraCorrectionFields,
   extractTenderFields,
   normalizeDepartment,
   parseDateCandidates,
@@ -14,6 +16,7 @@ describe("deterministic tender intelligence", () => {
   it("parses Pakistani tender dates", () => {
     const dates = parseDateCandidates("Last date for bid submission is 25-05-2026 at 11:00 AM.");
     expect(dates[0]?.value).toContain("2026-05-25");
+    expect(parseDateCandidates("Submit on or before Monday, July 20, 2026 10:00 AM.")[0]?.value).toBe("2026-07-20T10:00:00.000Z");
   });
 
   it("parses rupee money formats", () => {
@@ -27,10 +30,36 @@ describe("deterministic tender intelligence", () => {
     expect(fields.some((field) => field.fieldName === "pec_category" && field.fieldValue === "C-4")).toBe(true);
     expect(fields.some((field) => field.fieldName === "bid_security_amount")).toBe(true);
     expect(fields.some((field) => field.evidenceText.length > 0)).toBe(true);
+
+    const epadsDates = extractTenderFields("The RFP must be submitted on Monday, July 20, 2026 10:00 AM. Proposals will be opened on Monday, July 20, 2026 10:30 AM.");
+    expect(epadsDates.find((field) => field.fieldName === "closing_date")?.fieldValue).toBe("2026-07-20T10:00:00.000Z");
+    expect(epadsDates.find((field) => field.fieldName === "opening_date")?.fieldValue).toBe("2026-07-20T10:30:00.000Z");
+  });
+
+  it("prefers Punjab PPRA corrigendum replacement values", () => {
+    const fields = extractPunjabPpraCorrectionFields(
+      "Estimated Cost Rs.49.00 Million shall be read as Estimated Cost Rs.55.50 Million. " +
+      "Bid Security amount may be read as Rs.1,110,000 instead of Rs.980,000. " +
+      "The date for submission of bids has been extended from 07 th July, 2026 to 14 th July, 2026 (Tuesday) at 11:00AM (PST) and shall be opened on same date at 11:30AM (PST)."
+    );
+    expect(fields.find((field) => field.fieldName === "estimated_value")?.fieldValue).toBe("55500000");
+    expect(fields.find((field) => field.fieldName === "bid_security_amount")?.fieldValue).toBe("1110000");
+    expect(fields.find((field) => field.fieldName === "closing_date")?.fieldValue).toBe("2026-07-14T11:00:00.000Z");
+    expect(fields.find((field) => field.fieldName === "opening_date")?.fieldValue).toBe("2026-07-14T11:30:00.000Z");
+  });
+
+  it("extracts KP PPRA closing time and same-day opening time from a scanned-notice transcript", () => {
+    const fields = extractKpPpraNoticeFields(
+      "Interested bidders must upload their bids on or before 5th August 2026 till 10:30 a.m. " +
+      "The bids will be opened on the same day at 11:00 a.m. in the presence of bidders."
+    );
+    expect(fields.find((field) => field.fieldName === "closing_date")?.fieldValue).toBe("2026-08-05T10:30:00.000Z");
+    expect(fields.find((field) => field.fieldName === "opening_date")?.fieldValue).toBe("2026-08-05T11:00:00.000Z");
   });
 
   it("detects geography and normalizes departments", () => {
     expect(detectGeography("Tender for water supply works in Lahore Punjab").city).toBe("Lahore");
+    expect(detectGeography("PESCO HQ, Peshawar. Standard terms refer to Islamabad.").city).toBe("Peshawar");
     expect(normalizeDepartment("NHA procurement wing")).toBe("National Highway Authority");
   });
 

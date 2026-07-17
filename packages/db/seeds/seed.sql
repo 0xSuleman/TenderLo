@@ -173,32 +173,42 @@ where not exists (
 
 insert into tender_sources (name, base_url, source_type, region, adapter_key, scrape_frequency_minutes, status, metadata)
 values
-  ('Federal EPADS Open Procurements', 'https://epads.gov.pk/works/procurements', 'federal', 'Pakistan', 'federal-epads', 15, 'active', jsonb_build_object(
+  ('Federal EPADS Open Procurements', 'https://epads.gov.pk/?page=1', 'federal', 'Pakistan', 'federal-epads', 15, 'active', jsonb_build_object(
     'sourceGroup', 'ppra_epads',
     'portalFamily', 'ppra_epads',
     'documentPrefix', 'tender_ppra2',
     'knownSourceDomains', array['epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','ppra.org.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
   )),
-  ('Federal PPRA Active Tenders', 'https://epms.ppra.gov.pk/public/tenders/active-tenders', 'federal', 'Pakistan', 'federal-ppra-active', 15, 'active', jsonb_build_object(
+  ('Federal PPRA Active Tenders', 'https://epms.ppra.gov.pk/public/tenders/active-tenders', 'federal', 'Pakistan', 'federal-ppra-active', 360, 'active', jsonb_build_object(
     'sourceGroup', 'ppra_epads',
     'portalFamily', 'ppra_epads',
     'documentPrefix', 'tender_ppra2',
     'knownSourceDomains', array['ppra.org.pk','epms.ppra.gov.pk','epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
   )),
-  ('Punjab PPRA Public Procurement', 'https://eproc.punjab.gov.pk/ActiveTenders.aspx', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', '{}'::jsonb),
-  ('Sindh SPPRA Tender List', 'https://e.pprasindh.gov.pk/tenderlst', 'provincial', 'Sindh', 'sindh-sppra', 15, 'active', jsonb_build_object(
+  ('Punjab PPRA Public Procurement', 'https://eproc.punjab.gov.pk/Admin_Tender_Search.aspx', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', jsonb_build_object(
+    'sourceGroup', 'punjab_ppra',
+    'portalFamily', 'punjab_ppra',
+    'documentPrefix', 'tender_PUNJAB',
+    'knownSourceDomains', array['eproc.punjab.gov.pk','ppra.punjab.gov.pk','punjab.eprocure.gov.pk']
+  )),
+  ('Sindh SPPRA Public Tenders', 'https://portalsindh.eprocure.gov.pk/#/', 'provincial', 'Sindh', 'sindh-sppra', 360, 'active', jsonb_build_object(
     'sourceGroup', 'sindh_sppra',
     'portalFamily', 'sindh_sppra',
     'documentPrefix', 'tender_SINDH',
-    'knownSourceDomains', array['pprasindh.gov.pk','e.pprasindh.gov.pk','epads.pprasindh.gov.pk','portalsindh.eprocure.gov.pk','sindh.eprocure.gov.pk','sindhbank.com.pk','educationcity.gos.pk','tenders.iba.edu.pk','uok.edu.pk']
+    'knownSourceDomains', array['portalsindh.eprocure.gov.pk','apiprd.eprocure.gov.pk','pprasindh.gov.pk','e.pprasindh.gov.pk','epads.pprasindh.gov.pk','sindh.eprocure.gov.pk','sindhbank.com.pk','educationcity.gos.pk','tenders.iba.edu.pk','uok.edu.pk']
   )),
-  ('Khyber Pakhtunkhwa PPRA Active Tenders', 'https://www.kppra.gov.pk/kppra/activetenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-ppra-active', 15, 'active', jsonb_build_object(
+  ('Khyber Pakhtunkhwa PPRA Active Tenders', 'http://www.kppra.gov.pk/kppra/activetenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-ppra-active', 360, 'active', jsonb_build_object(
     'sourceGroup', 'kp_kppra',
     'portalFamily', 'kp_kppra',
     'documentPrefix', 'tender_kppra',
     'knownSourceDomains', array['kppra.gov.pk','portal.kppra.gov.pk','kp.eprocure.gov.pk','portalkp.eprocure.gov.pk','phedkp.gov.pk','lgkp.gov.pk','irrigation.gkp.pk','kth.edu.pk','kpogcl.com.pk','sbbwup.edu.pk','pkha.gov.pk']
   )),
-  ('Balochistan PPRA Tender Search', 'https://bppqa.vdc.services/tenderssearch/', 'provincial', 'Balochistan', 'balochistan-bppra', 15, 'active', '{}'::jsonb),
+  ('Balochistan PPRA Tenders', 'https://bpptwo.vdc.services:5451/Tenders', 'provincial', 'Balochistan', 'balochistan-bppra', 360, 'active', jsonb_build_object(
+    'sourceGroup', 'balochistan_bppra',
+    'portalFamily', 'balochistan_bppra',
+    'documentPrefix', 'tender_BALOCHISTAN',
+    'knownSourceDomains', array['bpptwo.vdc.services','bppqa.vdc.services','bppra.gob.pk']
+  )),
   ('Business Recorder Tenders', 'https://www.brecorder.com/business-finance/tenders', 'newspaper', 'Pakistan', 'business-recorder-tenders', 1440, 'active', '{}'::jsonb),
   ('Dawn Public Tender Notices', 'https://www.dawn.com/classifieds/tenders', 'newspaper', 'Pakistan', 'dawn-public-tenders', 1440, 'active', '{}'::jsonb),
   ('Daily Jang Public E-Paper', 'https://e.jang.com.pk/', 'newspaper', 'Pakistan', 'jang-epaper-public', 1440, 'active', '{}'::jsonb),
@@ -207,6 +217,48 @@ values
   ('IOM Pakistan Procurement Opportunities', 'https://pakistan.iom.int/procurement-opportunities', 'department', 'Pakistan', 'iom-pakistan-procurement', 15, 'active', '{}'::jsonb),
   ('DevelopmentAid Pakistan Public Tenders', 'https://www.developmentaid.org/tenders/search?locations=167&showAdvancedFilters=1', 'department', 'Pakistan', 'developmentaid-pakistan-public', 15, 'active', '{}'::jsonb)
 on conflict do nothing;
+
+update tender_sources
+set
+  base_url = 'http://www.kppra.gov.pk/kppra/activetenders',
+  scrape_frequency_minutes = 360,
+  updated_at = now()
+where adapter_key = 'kp-ppra-active';
+
+update tender_sources
+set
+  base_url = 'https://epms.ppra.gov.pk/public/tenders/active-tenders',
+  scrape_frequency_minutes = 360,
+  updated_at = now()
+where adapter_key = 'federal-ppra-active';
+
+update tender_sources
+set
+  name = 'Sindh SPPRA Public Tenders',
+  base_url = 'https://portalsindh.eprocure.gov.pk/#/',
+  scrape_frequency_minutes = 360,
+  metadata = jsonb_build_object(
+    'sourceGroup', 'sindh_sppra',
+    'portalFamily', 'sindh_sppra',
+    'documentPrefix', 'tender_SINDH',
+    'knownSourceDomains', array['portalsindh.eprocure.gov.pk','apiprd.eprocure.gov.pk','pprasindh.gov.pk','e.pprasindh.gov.pk','epads.pprasindh.gov.pk','sindh.eprocure.gov.pk','sindhbank.com.pk','educationcity.gos.pk','tenders.iba.edu.pk','uok.edu.pk']
+  ),
+  updated_at = now()
+where adapter_key = 'sindh-sppra';
+
+update tender_sources
+set
+  name = 'Balochistan PPRA Tenders',
+  base_url = 'https://bpptwo.vdc.services:5451/Tenders',
+  scrape_frequency_minutes = 360,
+  metadata = jsonb_build_object(
+    'sourceGroup', 'balochistan_bppra',
+    'portalFamily', 'balochistan_bppra',
+    'documentPrefix', 'tender_BALOCHISTAN',
+    'knownSourceDomains', array['bpptwo.vdc.services','bppqa.vdc.services','bppra.gob.pk']
+  ),
+  updated_at = now()
+where adapter_key = 'balochistan-bppra';
 
 insert into field_extraction_rules (field_name, rule_type, pattern, source_adapter_key, confidence_weight, enabled)
 values

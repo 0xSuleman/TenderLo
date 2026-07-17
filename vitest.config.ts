@@ -1,6 +1,9 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
-const root = "/Users/macbookpro/Desktop/TenderLo";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export default defineConfig({
   test: {
@@ -13,13 +16,13 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@tenderlo/shared": `${root}/packages/shared/src/index.ts`,
-      "@tenderlo/intelligence": `${root}/packages/intelligence/src/index.ts`,
-      "@tenderlo/scoring": `${root}/packages/scoring/src/index.ts`,
-      "@tenderlo/parsing": `${root}/packages/parsing/src/index.ts`,
-      "@tenderlo/sources": `${root}/packages/sources/src/index.ts`,
-      "@tenderlo/db": `${root}/packages/db/src/index.ts`,
-      "@tenderlo/notifications": `${root}/packages/notifications/src/index.ts`,
+      "@tenderlo/shared": resolve(__dirname, "packages/shared/src/index.ts"),
+      "@tenderlo/db": resolve(__dirname, "packages/db/src/index.ts"),
+      "@tenderlo/sources": resolve(__dirname, "packages/sources/src/index.ts"),
+      "@tenderlo/parsing": resolve(__dirname, "packages/parsing/src/index.ts"),
+      "@tenderlo/intelligence": resolve(__dirname, "packages/intelligence/src/index.ts"),
+      "@tenderlo/scoring": resolve(__dirname, "packages/scoring/src/index.ts"),
+      "@tenderlo/notifications": resolve(__dirname, "packages/notifications/src/index.ts")
     }
   }
 });

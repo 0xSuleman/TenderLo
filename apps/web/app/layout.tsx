@@ -13,8 +13,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>): JSX.Element {
   return (
-    <html lang="en">
-      <body className={`${inter.variable} ${outfit.variable} font-sans`}>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${inter.variable} ${outfit.variable} font-sans`} suppressHydrationWarning>
         <PageTransition>{children}</PageTransition>
       </body>
     </html>

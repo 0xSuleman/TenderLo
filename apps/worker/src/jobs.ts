@@ -6,6 +6,8 @@ import {
   calculateDuplicateConfidence,
   classifyTender,
   classifyTenderCategory,
+  extractKpPpraNoticeFields,
+  extractPunjabPpraCorrectionFields,
   extractTenderFields,
   normalizeDepartment
 } from "@tenderlo/intelligence";
@@ -39,11 +41,14 @@ export async function ingestAllDueSources(): Promise<void> {
   for (const source of (sources ?? []) as any[]) {
     const due = !source.last_run_at || Date.now() - new Date(source.last_run_at).getTime() >= source.scrape_frequency_minutes * 60_000;
     if (!due) continue;
+    const sourceTimeoutMs = ["federal-ppra-active", "sindh-sppra"].includes(source.adapter_key)
+      ? 60 * 60_000 // Large EPMS portals require polite API/detail/document crawls plus many idempotent DB writes.
+      : SOURCE_TIMEOUT_MS;
     try {
       await Promise.race([
         ingestSource(source.id),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Source ingest timed out after ${SOURCE_TIMEOUT_MS / 1000}s`)), SOURCE_TIMEOUT_MS)
+          setTimeout(() => reject(new Error(`Source ingest timed out after ${sourceTimeoutMs / 1000}s`)), sourceTimeoutMs)
         )
       ]);
     } catch (error) {
@@ -84,10 +89,11 @@ export async function ingestSource(sourceId: string): Promise<void> {
     const context = createSourceContext(source as any);
     context.parseDocument = parseDocument;
     const payloads = await adapter.fetchTenders(context);
+    const documentBudget = { remaining: sourceRuntimeConfig.maxDocumentDownloadsPerSourceRun };
 
     for (const payload of payloads) {
       await storeRawSnapshot(supabase, source as any, run as any, payload);
-      const outcome = await upsertTenderFromPayload(supabase, source as any, payload);
+      const outcome = await upsertTenderFromPayload(supabase, source as any, payload, documentBudget);
       if (outcome.created) created += 1;
       else updated += 1;
       if (outcome.duplicatesFound) duplicates += outcome.duplicatesFound;
@@ -211,7 +217,8 @@ export async function sendPendingAlerts(): Promise<void> {
 async function upsertTenderFromPayload(
   supabase: DatabaseClient,
   source: { id: string; source_type: string; name: string; adapter_key?: string | null; metadata?: Json | null },
-  payload: RawTenderPayload
+  payload: RawTenderPayload,
+  documentBudget: { remaining: number }
 ): Promise<{ tenderId: string; created: boolean; duplicatesFound: number }> {
   const normalizedTitle = normalizeForSearch(payload.title);
   const canonicalTenderId = buildCanonicalTenderId({
@@ -233,41 +240,51 @@ async function upsertTenderFromPayload(
   const extractionConfidence = extractionFields.length
     ? extractionFields.reduce((sum, field) => sum + field.confidenceScore, 0) / extractionFields.length
     : pipelineRuntimeConfig.defaultExtractionConfidence;
+  const sourceRequiresReview = /violated|cancel(?:led|ed)?|withdrawn|rejected/i.test(payload.sourceStatus ?? "");
 
-  const { data: existing } = await supabase.from("tenders").select("*").eq("canonical_tender_id", canonicalTenderId).maybeSingle();
+  const { data: canonicalExisting } = await supabase.from("tenders").select("*").eq("canonical_tender_id", canonicalTenderId).maybeSingle();
+  let existing = canonicalExisting;
+  if (!existing && payload.sourceUrl) {
+    const { data: sourceUrlExisting } = await supabase
+      .from("tenders")
+      .select("*")
+      .eq("source_id", source.id)
+      .eq("source_url", payload.sourceUrl)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    existing = sourceUrlExisting;
+  }
   let tender = existing;
 
   if (!existing?.is_human_verified) {
-    const { data: upsertedTender, error } = await supabase
-      .from("tenders")
-      .upsert(
-        {
-          source_id: source.id,
-          canonical_tender_id: canonicalTenderId,
-          title: payload.title,
-          normalized_title: normalizedTitle,
-          source_url: payload.sourceUrl,
-          tender_number: payload.tenderNumber ?? null,
-          department: normalizeDepartment(payload.department) ?? payload.department ?? null,
-          procurement_category: procurementCategory,
-          sector: primarySector,
-          province: payload.province ?? derived.province,
-          city: payload.city ?? derived.city,
-          description: payload.description ?? null,
-          advertisement_date: payload.advertisementDate ?? null,
-          closing_date: payload.closingDate ?? derived.closing_date,
-          opening_date: payload.openingDate ?? derived.opening_date,
-          bid_security_amount: payload.bidSecurityAmount ?? derived.bid_security_amount,
-          estimated_value: payload.estimatedValue ?? derived.estimated_value,
-          document_fee: payload.documentFee ?? derived.document_fee,
-          status: extractionConfidence >= pipelineRuntimeConfig.publishConfidenceThreshold && primarySector !== "uncategorized" ? "published" : "under_review",
-          extraction_confidence: extractionConfidence,
-          is_human_verified: false
-        },
-        { onConflict: "canonical_tender_id" }
-      )
-      .select("*")
-      .single();
+    const values = {
+      source_id: source.id,
+      canonical_tender_id: canonicalTenderId,
+      title: payload.title,
+      normalized_title: normalizedTitle,
+      source_url: payload.sourceUrl,
+      tender_number: payload.tenderNumber ?? null,
+      department: normalizeDepartment(payload.department) ?? payload.department ?? null,
+      procurement_category: procurementCategory,
+      sector: primarySector,
+      province: payload.province ?? derived.province,
+      city: payload.city ?? derived.city,
+      description: payload.description ?? null,
+      advertisement_date: payload.advertisementDate ?? null,
+      closing_date: payload.closingDate ?? derived.closing_date,
+      opening_date: payload.openingDate ?? derived.opening_date,
+      bid_security_amount: payload.bidSecurityAmount ?? derived.bid_security_amount,
+      estimated_value: payload.estimatedValue ?? derived.estimated_value,
+      document_fee: payload.documentFee ?? derived.document_fee,
+      status: extractionConfidence >= pipelineRuntimeConfig.publishConfidenceThreshold && primarySector !== "uncategorized" && !sourceRequiresReview ? "published" : "under_review",
+      extraction_confidence: extractionConfidence,
+      is_human_verified: false
+    };
+    const persistence = existing
+      ? supabase.from("tenders").update(values).eq("id", existing.id)
+      : supabase.from("tenders").upsert(values, { onConflict: "canonical_tender_id" });
+    const { data: upsertedTender, error } = await persistence.select("*").single();
     if (error) throw error;
     tender = upsertedTender;
   }
@@ -300,10 +317,21 @@ async function upsertTenderFromPayload(
       details: safeJson(sourceProvenance)
     });
   }
+  const sourceDocumentErrors = metadataStringArray(sourceMetadataValue(payload.sourceMetadata, "documentLookupErrors"));
+  if (sourceDocumentErrors.length) {
+    await createQaTask(supabase, {
+      tenderId: tender.id,
+      sourceId: source.id,
+      taskType: "parser_failure",
+      priority: "medium",
+      title: `Source document inventory is incomplete on ${source.name}`,
+      details: safeJson({ sourceUrl: payload.sourceUrl, errors: sourceDocumentErrors })
+    });
+  }
 
   await persistSectorMatches(supabase, tender.id, classification);
   await persistExtractedFields(supabase, tender.id, null, extractionFields);
-  await downloadAndParseDocuments(supabase, tender.id, payload, source);
+  await downloadAndParseDocuments(supabase, tender.id, payload, source, documentBudget);
 
   if (primarySector === "uncategorized") {
     await createQaTask(supabase, {
@@ -328,14 +356,30 @@ async function downloadAndParseDocuments(
   supabase: DatabaseClient,
   tenderId: string,
   payload: RawTenderPayload,
-  source: { adapter_key?: string | null; metadata?: Json | null }
+  source: { adapter_key?: string | null; metadata?: Json | null },
+  documentBudget: { remaining: number }
 ): Promise<void> {
   const sourceGroup = metadataString(payload.sourceGroup) ?? metadataString(sourceMetadataValue(source.metadata, "sourceGroup"));
   const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? "tender_document";
   for (const document of payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)) {
+    const { data: recentDocument, error: recentDocumentError } = await supabase
+      .from("tender_documents")
+      .select("id, parser_status, updated_at")
+      .eq("tender_id", tenderId)
+      .eq("source_url", document.url)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (recentDocumentError) throw recentDocumentError;
+    const refreshedWithinOneDay = recentDocument?.updated_at
+      && Date.now() - new Date(recentDocument.updated_at).getTime() < 24 * 60 * 60 * 1000;
+    if (recentDocument?.parser_status === "parsed" && refreshedWithinOneDay) continue;
+    if (documentBudget.remaining <= 0) return;
+    documentBudget.remaining -= 1;
+
     let fetched: Awaited<ReturnType<typeof fetchBinary>>;
     try {
-      fetched = await fetchBinary(document.url);
+      fetched = await fetchBinary(document.url, undefined, document.downloadRequest);
     } catch (fetchErr) {
       await createQaTask(supabase, {
         tenderId,
@@ -357,8 +401,29 @@ async function downloadAndParseDocuments(
       continue;
     }
 
+    const documentValidationError = validateDownloadedDocument({
+      buffer: fetched.buffer,
+      contentType: fetched.contentType,
+      filename: fetched.filename ?? document.filename
+    });
+    if (documentValidationError) {
+      await createQaTask(supabase, {
+        tenderId,
+        taskType: "parser_failure",
+        priority: "high",
+        title: "Tender document download failed file validation",
+        details: safeJson({
+          url: document.url,
+          filename: document.filename ?? null,
+          content_type: fetched.contentType,
+          error: documentValidationError
+        })
+      });
+      continue;
+    }
+
     const hash = sha256(fetched.buffer);
-    const filename = document.filename ?? (basename(new URL(document.url).pathname) || "tender-document");
+    const filename = fetched.filename ?? document.filename ?? (basename(new URL(document.url).pathname) || "tender-document");
     const storagePath = buildTenderDocumentStoragePath({
       adapterKey: source.adapter_key ?? "unknown-source",
       documentPrefix,
@@ -430,8 +495,14 @@ async function downloadAndParseDocuments(
       );
     }
 
-    const documentFields = extractTenderFields(mergeParsedPages(parsed.pages));
+    const documentText = mergeParsedPages(parsed.pages);
+    const documentFields = normalizeDocumentFieldsForSource(
+      extractTenderFields(documentText),
+      source.adapter_key,
+      documentText
+    );
     await persistExtractedFields(supabase, tenderId, tenderDocument.id, documentFields);
+    await promoteDocumentFieldsToTender(supabase, tenderId, documentFields);
     if (payload.newspaperName && parsed.ocrStatus === "completed") {
       await createQaTask(supabase, {
         tenderId,
@@ -442,6 +513,125 @@ async function downloadAndParseDocuments(
       });
     }
   }
+}
+
+export function validateDownloadedDocument(input: {
+  buffer: Buffer;
+  contentType?: string | null | undefined;
+  filename?: string | null | undefined;
+}): string | null {
+  if (!input.buffer.length) return "Downloaded document is empty.";
+  const filename = (input.filename ?? "").toLowerCase();
+  const contentType = (input.contentType ?? "").split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  const expectsPdf = filename.endsWith(".pdf") || contentType === "application/pdf";
+  const expectsJpeg = /\.jpe?g$/.test(filename) || contentType === "image/jpeg" || contentType === "image/jpg";
+  const expectsPng = filename.endsWith(".png") || contentType === "image/png";
+  const expectsTiff = /\.tiff?$/.test(filename) || contentType === "image/tiff";
+  const expectsWebp = filename.endsWith(".webp") || contentType === "image/webp";
+
+  if (expectsPdf && input.buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    return "Expected a PDF but the response does not have a PDF signature.";
+  }
+  if (expectsJpeg && !(input.buffer[0] === 0xff && input.buffer[1] === 0xd8 && input.buffer[2] === 0xff)) {
+    return "Expected a JPEG but the response does not have a JPEG signature.";
+  }
+  if (expectsPng && !input.buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "Expected a PNG but the response does not have a PNG signature.";
+  }
+  if (expectsTiff) {
+    const signature = input.buffer.subarray(0, 4).toString("hex");
+    if (signature !== "49492a00" && signature !== "4d4d002a") return "Expected a TIFF but the response does not have a TIFF signature.";
+  }
+  if (expectsWebp && !(input.buffer.subarray(0, 4).toString("ascii") === "RIFF" && input.buffer.subarray(8, 12).toString("ascii") === "WEBP")) {
+    return "Expected a WebP image but the response does not have a WebP signature.";
+  }
+  if ((expectsPdf || expectsJpeg || expectsPng || expectsTiff || expectsWebp) && /^(?:text\/html|application\/json)$/.test(contentType)) {
+    return `Expected a binary tender document but received ${contentType}.`;
+  }
+  return null;
+}
+
+function normalizeDocumentFieldsForSource(
+  fields: ExtractedFieldResult[],
+  adapterKey: string | null | undefined,
+  documentText: string
+): ExtractedFieldResult[] {
+  let normalizedFields = fields;
+  if (adapterKey === "punjab-ppra") {
+    const corrections = extractPunjabPpraCorrectionFields(documentText);
+    const correctedNames = new Set(corrections.map((field) => field.fieldName));
+    normalizedFields = [...corrections, ...fields.filter((field) => !correctedNames.has(field.fieldName))];
+  }
+  if (adapterKey === "kp-ppra-active") {
+    const noticeFields = extractKpPpraNoticeFields(documentText);
+    const preciseNames = new Set(noticeFields.map((field) => field.fieldName));
+    normalizedFields = [
+      ...noticeFields,
+      ...fields
+        .filter((field) => !preciseNames.has(field.fieldName))
+        .map((field) => ["bid_security_amount", "estimated_value", "document_fee"].includes(field.fieldName)
+          ? { ...field, confidenceScore: 0.69, verificationStatus: "needs_review" as const }
+          : field)
+    ];
+  }
+  if (adapterKey !== "federal-epads" && adapterKey !== "federal-ppra-active" && adapterKey !== "punjab-ppra" && adapterKey !== "kp-ppra-active" && adapterKey !== "balochistan-bppra" && adapterKey !== "sindh-sppra") return normalizedFields;
+  return normalizedFields.map((field) => {
+    if (field.fieldName !== "closing_date" && field.fieldName !== "opening_date") return field;
+    const parsed = new Date(field.fieldValue);
+    if (Number.isNaN(parsed.getTime())) return field;
+    return {
+      ...field,
+      fieldValue: new Date(parsed.getTime() - 5 * 60 * 60 * 1000).toISOString()
+    };
+  });
+}
+
+async function promoteDocumentFieldsToTender(
+  supabase: DatabaseClient,
+  tenderId: string,
+  fields: ExtractedFieldResult[]
+): Promise<void> {
+  const { data: tender, error } = await supabase.from("tenders").select("*").eq("id", tenderId).maybeSingle();
+  if (error) throw error;
+  if (!tender) return;
+  const updates = buildTenderFieldPromotion(tender, fields);
+  if (!Object.keys(updates).length) return;
+  const { error: updateError } = await supabase.from("tenders").update(updates).eq("id", tenderId);
+  if (updateError) throw updateError;
+}
+
+export function buildTenderFieldPromotion(
+  tender: Record<string, any>,
+  fields: ExtractedFieldResult[]
+): Record<string, string | number> {
+  if (tender.is_human_verified) return {};
+  const promotable = new Set([
+    "closing_date",
+    "opening_date",
+    "bid_security_amount",
+    "estimated_value",
+    "document_fee",
+    "province",
+    "city"
+  ]);
+  const updates: Record<string, string | number> = {};
+  for (const field of fields) {
+    if (!promotable.has(field.fieldName)) continue;
+    const existingValue = tender[field.fieldName];
+    const replaceApproximatePortalDeadline = field.fieldName === "closing_date"
+      && typeof existingValue === "string"
+      && existingValue.endsWith("T18:59:59.999Z");
+    if (existingValue !== null && existingValue !== undefined && !replaceApproximatePortalDeadline) continue;
+    if (updates[field.fieldName] !== undefined) continue;
+    if (field.confidenceScore < pipelineRuntimeConfig.lowConfidenceFieldThreshold || field.verificationStatus === "needs_review") continue;
+    if (["bid_security_amount", "estimated_value", "document_fee"].includes(field.fieldName)) {
+      const value = Number(field.fieldValue);
+      if (Number.isFinite(value) && value >= 0) updates[field.fieldName] = value;
+      continue;
+    }
+    if (field.fieldValue.trim()) updates[field.fieldName] = field.fieldValue;
+  }
+  return updates;
 }
 
 async function persistExtractedFields(
@@ -679,17 +869,30 @@ function deriveTenderValues(payload: RawTenderPayload, fields: ExtractedFieldRes
 function payloadMetadataFields(payload: RawTenderPayload): ExtractedFieldResult[] {
   const fields: ExtractedFieldResult[] = [];
   const evidence = normalizeWhitespace(`${payload.title}\n${payload.description ?? ""}`).slice(0, 500);
-  for (const [fieldName, fieldValue] of [
-    ["procurement_method", payload.procurementMethod],
-    ["submission_method", payload.submissionMethod],
-    ["contact_person", payload.contactPerson]
+  for (const [fieldName, rawFieldValue, confidenceScore] of [
+    ["tender_number", payload.tenderNumber, 0.92],
+    ["department", payload.department, 0.9],
+    ["procurement_category", payload.procurementCategory, 0.9],
+    ["advertisement_date", payload.advertisementDate, 0.9],
+    ["closing_date", payload.closingDate, 0.9],
+    ["opening_date", payload.openingDate, 0.9],
+    ["province", payload.province, 0.86],
+    ["city", payload.city, 0.86],
+    ["bid_security_amount", payload.bidSecurityAmount, 0.9],
+    ["estimated_value", payload.estimatedValue, 0.9],
+    ["document_fee", payload.documentFee, 0.9],
+    ["procurement_method", payload.procurementMethod, 0.82],
+    ["submission_method", payload.submissionMethod, 0.82],
+    ["contact_person", payload.contactPerson, 0.82],
+    ["source_status", payload.sourceStatus, 0.9]
   ] as const) {
+    const fieldValue = rawFieldValue === undefined || rawFieldValue === null ? undefined : String(rawFieldValue);
     if (!fieldValue) continue;
     fields.push({
       fieldName,
       fieldValue,
       sourceMethod: "html_selector",
-      confidenceScore: 0.82,
+      confidenceScore,
       evidenceText: evidence || fieldValue,
       verificationStatus: "unverified"
     });

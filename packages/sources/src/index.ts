@@ -71,6 +71,7 @@ type BuildPayloadInput = {
   procurementMethod?: string | undefined;
   submissionMethod?: string | undefined;
   contactPerson?: string | undefined;
+  sourceStatus?: string | undefined;
   originalSourceUrl?: string | undefined;
   websiteUrl?: string | undefined;
 };
@@ -120,6 +121,1993 @@ export class ProfiledPublicSourceAdapter implements SourceAdapter {
 
     return payloads;
   }
+}
+
+const federalEpadsProfile: SourceProfile = {
+  key: "federal-epads",
+  name: "Federal EPADS",
+  sourceType: "federal",
+  region: "Pakistan",
+  sourceGroup: "ppra_epads",
+  documentPrefix: "tender_ppra2",
+  portalFamily: "ppra_epads",
+  knownSourceDomains: [
+    "epads.gov.pk",
+    "pa.epads.gov.pk",
+    "vendors.epads.gov.pk",
+    "eprocure.gov.pk",
+    "procure.gov.pk",
+    "ppra.org.pk"
+  ],
+  listing: {
+    rowSelector: "table.table-cb tbody tr"
+  },
+  defaultSubmissionMethod: "Electronic via EPADS"
+};
+
+export class FederalEpadsAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = federalEpadsProfile.key;
+  readonly name = federalEpadsProfile.name;
+  readonly sourceType: SourceType = federalEpadsProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(federalEpadsProfile, context.metadata);
+    const firstPageUrl = federalEpadsPageUrl(context.baseUrl, 1);
+    const firstPage = await fetchPublicText(firstPageUrl, context.userAgent);
+    const payloads = parseFederalEpadsListing(firstPage.text, firstPageUrl, profile);
+    const lastPage = federalEpadsLastPage(firstPage.text, firstPageUrl);
+
+    for (let page = 2; page <= lastPage; page += 1) {
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      const pageUrl = federalEpadsPageUrl(context.baseUrl, page);
+      const response = await fetchPublicText(pageUrl, context.userAgent);
+      payloads.push(...parseFederalEpadsListing(response.text, pageUrl, profile));
+    }
+
+    const unique = new Map<string, RawTenderPayload>();
+    for (const payload of payloads) unique.set(payload.sourceUrl, payload);
+    if (!unique.size) throw new SourceFetchError("Federal EPADS returned no procurement rows.");
+    return [...unique.values()];
+  }
+}
+
+export function parseFederalEpadsListing(
+  html: string,
+  pageUrl: string,
+  profile: SourceProfile = federalEpadsProfile
+): RawTenderPayload[] {
+  const $ = cheerio.load(html);
+  const payloads: RawTenderPayload[] = [];
+
+  $(profile.listing.rowSelector).each((_, row) => {
+    const rowHandle = $(row);
+    const cells = rowHandle.find("td");
+    if (cells.length < 6) return;
+
+    const tenderNumber = normalizeWhitespace(cells.eq(1).text()).toUpperCase();
+    const titleLink = cells.eq(2).find("a[href*='/opportunities/federal/procurements/']").first();
+    const tooltipElements = cells.eq(2).find("[data-bs-original-title], [title]");
+    const titleElement = titleLink.find("[data-bs-original-title], [title]").first();
+    const departmentElement = tooltipElements.eq(1);
+    const title = normalizeWhitespace(titleElement.attr("data-bs-original-title") ?? titleElement.attr("title") ?? titleElement.text() ?? titleLink.text());
+    const department = normalizeWhitespace(departmentElement.attr("data-bs-original-title") ?? departmentElement.attr("title") ?? departmentElement.text());
+    const detailHref = titleLink.attr("href") ?? cells.eq(5).find("a[href]").first().attr("href");
+    if (!detailHref || !/^P\d+$/i.test(tenderNumber) || title.length < 4) return;
+
+    const sourceUrl = normalizeSourceUrl(new URL(detailHref, pageUrl).toString());
+    const advertisementDateText = epadsStatusValue($, cells.eq(3), "Published On");
+    const closingDateText = epadsStatusValue($, cells.eq(3), "Closing On");
+    const procurementCategory = normalizeWhitespace(cells.eq(4).find(".badge").first().text());
+    const procurementMethod = normalizeWhitespace(cells.eq(4).find("span.text-secondary").first().text());
+    const hasStandardBiddingDocument = /\b(?:single|two) stage\b/i.test(procurementMethod);
+    const documentUrl = hasStandardBiddingDocument
+      ? `https://pa.epads.gov.pk/procurement/SBD/${tenderNumber.toLowerCase()}/bidding-document.pdf?download=true`
+      : sourceUrl;
+    const description = normalizeWhitespace([
+      title,
+      department,
+      procurementCategory,
+      procurementMethod,
+      advertisementDateText ? `Published On: ${advertisementDateText}` : "",
+      closingDateText ? `Closing On: ${closingDateText}` : ""
+    ].filter(Boolean).join(". "));
+    const rawRowHtml = $.html(rowHandle);
+
+    payloads.push(buildPayload(profile, {
+      sourceUrl,
+      title,
+      tenderNumber,
+      department: department || profile.name,
+      advertisementDate: parseFederalEpadsDate(advertisementDateText),
+      closingDate: parseFederalEpadsDeadline(closingDateText),
+      description,
+      procurementMethod: procurementMethod || profile.defaultProcurementMethod,
+      submissionMethod: profile.defaultSubmissionMethod,
+      websiteUrl: "https://epads.gov.pk/",
+      documents: [{
+        url: documentUrl,
+        filename: hasStandardBiddingDocument ? `${tenderNumber}-bidding-document.pdf` : `${tenderNumber}-procurement-detail.html`,
+        mimeType: hasStandardBiddingDocument ? "application/pdf" : "text/html",
+        sourceDocumentKey: `epads_${tenderNumber}_${hasStandardBiddingDocument ? "sbd" : "detail"}`
+      }],
+      rawHtml: rawRowHtml
+    }));
+    const payload = payloads.at(-1);
+    if (payload && procurementCategory) payload.procurementCategory = procurementCategory;
+  });
+
+  return payloads;
+}
+
+function epadsStatusValue($: cheerio.CheerioAPI, cell: cheerio.Cheerio<any>, label: string): string | undefined {
+  let value: string | undefined;
+  cell.find(".text-uppercase").each((_, element) => {
+    if (value || !normalizeWhitespace($(element).text()).toLowerCase().startsWith(label.toLowerCase())) return;
+    const badge = normalizeWhitespace($(element).closest("div").find(".badge").first().text());
+    if (badge) value = badge;
+  });
+  return value;
+}
+
+function parseFederalEpadsDate(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const match = normalizeWhitespace(value).match(
+    /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\s+(\d{1,2}):(\d{2})\s+(AM|PM)$/i
+  );
+  if (!match) return normalizeDate(value);
+  const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  const month = months.indexOf(String(match[1]).toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  let hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (String(match[6]).toLowerCase() === "pm" && hour < 12) hour += 12;
+  if (String(match[6]).toLowerCase() === "am" && hour === 12) hour = 0;
+  const pakistanOffsetMinutes = 5 * 60;
+  return new Date(Date.UTC(year, month, day, hour, minute) - pakistanOffsetMinutes * 60_000).toISOString();
+}
+
+export function parseFederalEpadsDeadline(value: string | undefined, fetchedAt = new Date()): string | undefined {
+  const absolute = parseFederalEpadsDate(value);
+  if (absolute || !value) return absolute;
+  const relative = normalizeWhitespace(value).match(/^(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?left$/i);
+  if (!relative || (!relative[1] && !relative[2] && !relative[3])) return undefined;
+  const milliseconds = (
+    Number(relative[1] ?? 0) * 24 * 60
+    + Number(relative[2] ?? 0) * 60
+    + Number(relative[3] ?? 0)
+  ) * 60_000;
+  return new Date(fetchedAt.getTime() + milliseconds).toISOString();
+}
+
+function federalEpadsPageUrl(baseUrl: string, page: number): string {
+  const url = new URL("/", baseUrl);
+  url.searchParams.set("page", String(page));
+  return url.toString();
+}
+
+function federalEpadsLastPage(html: string, pageUrl: string): number {
+  const $ = cheerio.load(html);
+  let lastPage = 1;
+  $("a[href*='page=']").each((_, element) => {
+    try {
+      const page = Number(new URL($(element).attr("href") ?? "", pageUrl).searchParams.get("page"));
+      if (Number.isInteger(page) && page > lastPage && page <= 100) lastPage = page;
+    } catch {
+      // Ignore malformed pagination links and keep the valid page range.
+    }
+  });
+  return lastPage;
+}
+
+const federalPpraProfile: SourceProfile = {
+  key: "federal-ppra-active",
+  name: "Federal PPRA Active Tenders",
+  sourceType: "federal",
+  region: "Pakistan",
+  sourceGroup: "ppra_epads",
+  documentPrefix: "tender_ppra2",
+  portalFamily: "ppra_epads",
+  knownSourceDomains: [
+    "ppra.org.pk",
+    "epms.ppra.gov.pk",
+    "epads.gov.pk",
+    "vendors.epads.gov.pk",
+    "eprocure.gov.pk",
+    "procure.gov.pk"
+  ],
+  listing: {
+    rowSelector: "table tbody tr"
+  }
+};
+
+const federalPpraMaxPages = 100;
+
+export class FederalPpraAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = federalPpraProfile.key;
+  readonly name = federalPpraProfile.name;
+  readonly sourceType: SourceType = federalPpraProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(federalPpraProfile, context.metadata);
+    const firstPageUrl = federalPpraPageUrl(context.baseUrl, 1);
+    const firstPage = await fetchPublicText(firstPageUrl, context.userAgent);
+    const pageCount = federalPpraPageCount(firstPage.text);
+    if (pageCount > federalPpraMaxPages) {
+      throw new SourceFetchError(`Federal PPRA reported an unsafe page count (${pageCount}).`);
+    }
+
+    const pagePayloads = [parseFederalPpraListing(firstPage.text, firstPageUrl, profile)];
+    const remainingPages = await Promise.all(Array.from({ length: pageCount - 1 }, async (_, index) => {
+      const page = index + 2;
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs * (index + 1));
+      const pageUrl = federalPpraPageUrl(context.baseUrl, page);
+      const response = await fetchPublicText(pageUrl, context.userAgent);
+      const payloads = parseFederalPpraListing(response.text, pageUrl, profile);
+      if (!payloads.length) throw new SourceFetchError(`Federal PPRA page ${page} returned no tender rows.`);
+      return payloads;
+    }));
+    pagePayloads.push(...remainingPages);
+
+    const unique = new Map<string, RawTenderPayload>();
+    for (const payload of pagePayloads.flat()) {
+      unique.set(payload.tenderNumber ?? payload.sourceUrl, payload);
+    }
+    const listingPayloads = [...unique.values()];
+    if (!listingPayloads.length) throw new SourceFetchError("Federal PPRA returned no active tender rows.");
+
+    const detailedPayloads = await Promise.all(listingPayloads.map(async (payload, index) => {
+      if (index > 0) await sleep(sourceRuntimeConfig.politeRequestDelayMs * index);
+      try {
+        const response = await fetchPublicText(payload.sourceUrl, context.userAgent);
+        return parseFederalPpraDetail(response.text, payload.sourceUrl, profile, payload);
+      } catch (error) {
+        payload.sourceMetadata = safeJson({
+          ...(payload.sourceMetadata as Record<string, Json>),
+          detailFetchStatus: "failed",
+          detailFetchError: error instanceof Error ? error.message : String(error)
+        });
+        return payload;
+      }
+    }));
+
+    const fetchedDetails = detailedPayloads.filter((payload) => {
+      const metadata = metadataRecord(payload.sourceMetadata);
+      return metadataString(metadata?.detailFetchStatus) === "fetched";
+    }).length;
+    if (detailedPayloads.length >= 10 && fetchedDetails / detailedPayloads.length < 0.8) {
+      throw new SourceFetchError(`Federal PPRA detail coverage fell below the safe threshold (${fetchedDetails}/${detailedPayloads.length}).`);
+    }
+    return detailedPayloads;
+  }
+}
+
+export function parseFederalPpraListing(
+  html: string,
+  pageUrl: string,
+  profile: SourceProfile = federalPpraProfile
+): RawTenderPayload[] {
+  const $ = cheerio.load(html);
+  const payloads: RawTenderPayload[] = [];
+  $(profile.listing.rowSelector).each((_, row) => {
+    const rowHandle = $(row);
+    const cells = rowHandle.find("td");
+    if (cells.length < 8) return;
+
+    const tenderNumber = normalizeWhitespace(cells.eq(1).find("strong").first().text()).toUpperCase();
+    const detailHref = cells.eq(7).find("a[href*='/public/tenders/tender-details/']").first().attr("href");
+    const invoiceHref = cells.eq(7).find("a[href*='/public/tenders/invoice/']").first().attr("href");
+    const title = normalizeWhitespace(cells.eq(2).find("div > strong").first().text());
+    if (!/^TS[0-9A-Z]+$/i.test(tenderNumber) || !detailHref || !title) return;
+
+    const sourceUrl = normalizeSourceUrl(new URL(detailHref, pageUrl).toString());
+    const invoiceUrl = invoiceHref ? normalizeSourceUrl(new URL(invoiceHref, pageUrl).toString()) : undefined;
+    const detailBadges = cells.eq(2).find("small.badge").filter((_, element) => !$(element).find(".ri-organization-chart").length);
+    const sector = normalizeWhitespace(detailBadges.eq(0).text());
+    const agencyReference = normalizeWhitespace(detailBadges.eq(1).text());
+    const organization = normalizeWhitespace(cells.eq(3).find(".ri-organization-chart").first().closest("small").text());
+    const officeName = normalizeWhitespace(cells.eq(3).find(".tender-org").first().text());
+    const location = normalizeWhitespace(cells.eq(3).find(".ri-map-pin-line").first().closest("small").text());
+    const [city, ...countryParts] = location.split(/\s+-\s+/);
+    const country = normalizeWhitespace(countryParts.join(" - "));
+    const sourceStatus = normalizeWhitespace(cells.eq(4).find(".tender-badge").map((_, element) => $(element).text()).get().join("; "));
+    const statusDetailHandle = cells.eq(4).clone();
+    statusDetailHandle.find(".tender-badge").remove();
+    const statusDetail = normalizeWhitespace(statusDetailHandle.text());
+    const advertisedText = normalizeWhitespace(cells.eq(5).text());
+    const closingText = normalizeWhitespace(cells.eq(6).text());
+    const descriptions = cells.eq(2).find("small.text-muted.d-block").map((_, element) => normalizeWhitespace($(element).text())).get();
+    const description = [...new Set([title, ...descriptions].filter(Boolean))].join(". ");
+    const fallbackDetailDocument: RawTenderPayload["documents"] = [{
+      url: sourceUrl,
+      filename: `${tenderNumber}-detail.html`,
+      mimeType: "text/html",
+      sourceDocumentKey: `epms_detail_${tenderNumber}`
+    }];
+    const payload = buildPayload(profile, {
+      sourceUrl,
+      title,
+      tenderNumber,
+      department: organization || officeName || profile.name,
+      advertisementDate: parseFederalPpraDate(advertisedText, false),
+      closingDate: parseFederalPpraDate(closingText, true),
+      city: cleanOptional(city),
+      description,
+      documents: fallbackDetailDocument,
+      sourceStatus,
+      websiteUrl: "https://epms.ppra.gov.pk/",
+      rawHtml: $.html(rowHandle)
+    });
+    payload.sourceMetadata = safeJson({
+      ...(payload.sourceMetadata as Record<string, Json>),
+      listingPageUrl: pageUrl,
+      invoiceUrl,
+      agencyReference,
+      sector,
+      officeName,
+      country,
+      statusDetail,
+      detailFetchStatus: "pending"
+    });
+    payloads.push(payload);
+  });
+  return payloads;
+}
+
+export function parseFederalPpraDetail(
+  html: string,
+  detailUrl: string,
+  profile: SourceProfile,
+  listingPayload: RawTenderPayload
+): RawTenderPayload {
+  const $ = cheerio.load(html);
+  const fields = federalPpraDetailFields($);
+  const pageTitle = normalizeWhitespace($("h1").first().text());
+  const pageTenderNumber = normalizeWhitespace($(".hero p strong").first().text()).toUpperCase();
+  if (!pageTitle || !/^TS[0-9A-Z]+$/i.test(pageTenderNumber) || (listingPayload.tenderNumber && pageTenderNumber !== listingPayload.tenderNumber)) {
+    throw new SourceFetchError(`Federal PPRA detail page did not match ${listingPayload.tenderNumber ?? detailUrl}.`);
+  }
+  const title = pageTitle;
+  const tenderNumber = pageTenderNumber;
+  const organization = federalPpraField(fields, "Organization Name") ?? listingPayload.department;
+  const officeName = federalPpraField(fields, "Office Name");
+  const officeAddress = federalPpraField(fields, "Office Address");
+  const city = federalPpraField(fields, "City") ?? listingPayload.city;
+  const contactPerson = normalizeWhitespace([
+    federalPpraField(fields, "Contact Person"),
+    federalPpraField(fields, "Contact Email"),
+    federalPpraField(fields, "Contact Phone")
+  ].filter(Boolean).join(" | ")) || listingPayload.contactPerson;
+  const agencyReference = federalPpraField(fields, "Tender No / Reference No / Tender Inquiry No");
+  const procurementCategory = federalPpraField(fields, "Procurement Category");
+  const procurementMethod = federalPpraField(fields, "Procurement Procedure");
+  const sector = federalPpraField(fields, "Sector");
+  const tenderNature = federalPpraField(fields, "Tender Nature");
+  const tenderType = federalPpraField(fields, "Tender Type");
+  const advertisementDate = parseFederalPpraDate(federalPpraField(fields, "Advertisement Date"), false) ?? listingPayload.advertisementDate;
+  const closingText = federalPpraField(fields, "Closing Date & Time");
+  const closingDate = parseFederalPpraDate(closingText, true) ?? listingPayload.closingDate;
+  const openingDate = federalPpraOpeningDate(closingText, federalPpraField(fields, "Opening Time"));
+  const estimatedValue = parseMoney(federalPpraField(fields, "Estimated Cost"));
+  const bidSecurityAmount = parseMoney(federalPpraField(fields, "Bid Security"));
+  const documentFee = parseMoney(federalPpraField(fields, "Tender Document Cost"));
+  const bidValidity = federalPpraField(fields, "Bid Validity");
+  const description = federalPpraSectionText($, "Description") ?? listingPayload.description ?? title;
+  const note = federalPpraSectionText($, "Note");
+  const corrigenda = $(".corrigendum-item").map((_, element) => normalizeWhitespace($(element).text())).get();
+  const detailStatus = normalizeWhitespace($(".badge-corrigendum").first().text());
+  const sourceStatus = normalizeWhitespace([listingPayload.sourceStatus, detailStatus].filter(Boolean).join("; "));
+  const documents = federalPpraDocuments($, detailUrl, tenderNumber ?? "tender");
+  const submissionMethod = inferSubmissionMethod(description);
+
+  const payload = buildPayload(profile, {
+    sourceUrl: detailUrl,
+    title,
+    tenderNumber,
+    department: organization,
+    advertisementDate,
+    closingDate,
+    city,
+    estimatedValue,
+    description: normalizeWhitespace([description, note ? `Note: ${note}` : ""].filter(Boolean).join(". ")),
+    documents: documents.length ? documents : listingPayload.documents,
+    procurementMethod,
+    submissionMethod,
+    contactPerson,
+    sourceStatus,
+    websiteUrl: "https://epms.ppra.gov.pk/",
+    rawHtml: html
+  });
+  if (openingDate) payload.openingDate = openingDate;
+  if (bidSecurityAmount !== undefined) payload.bidSecurityAmount = bidSecurityAmount;
+  if (documentFee !== undefined) payload.documentFee = documentFee;
+  if (procurementCategory) payload.procurementCategory = procurementCategory;
+  payload.sourceMetadata = safeJson({
+    ...(listingPayload.sourceMetadata as Record<string, Json>),
+    ...(payload.sourceMetadata as Record<string, Json>),
+    detailFetchStatus: "fetched",
+    invoiceUrl: metadataString(metadataRecord(listingPayload.sourceMetadata)?.invoiceUrl),
+    agencyReference,
+    officeName,
+    officeAddress,
+    sector,
+    tenderNature,
+    tenderType,
+    bidValidity,
+    note,
+    corrigenda
+  });
+  return payload;
+}
+
+function federalPpraDetailFields($: cheerio.CheerioAPI): Map<string, string> {
+  const fields = new Map<string, string>();
+  $(".list-group-item").each((_, element) => {
+    const label = federalPpraFieldKey($(element).find(".detail-label").first().text());
+    const value = normalizeWhitespace($(element).find(".flex-grow-1, .detail-value").first().text());
+    if (label && value && !fields.has(label)) fields.set(label, value);
+  });
+  return fields;
+}
+
+function federalPpraField(fields: Map<string, string>, label: string): string | undefined {
+  return fields.get(federalPpraFieldKey(label));
+}
+
+function federalPpraFieldKey(value: string): string {
+  return normalizeWhitespace(value).replace(/:$/, "").toLowerCase();
+}
+
+function federalPpraSectionText($: cheerio.CheerioAPI, heading: string): string | undefined {
+  const headingElement = $("h6").filter((_, element) => normalizeWhitespace($(element).text()).toLowerCase() === heading.toLowerCase()).first();
+  const value = normalizeWhitespace(headingElement.parent().find(".bg-light").first().text());
+  return value || undefined;
+}
+
+function federalPpraDocuments($: cheerio.CheerioAPI, detailUrl: string, tenderNumber: string): RawTenderPayload["documents"] {
+  const documents: RawTenderPayload["documents"] = [];
+  $("a[href*='/pdf?file=']").each((_, element) => {
+    const href = $(element).attr("href");
+    if (!href) return;
+    const url = normalizeSourceUrl(new URL(href, detailUrl).toString());
+    const label = normalizeWhitespace($(element).text());
+    const kind = /advertisement/i.test(label) ? "advertisement" : "tender";
+    const filename = federalPpraPdfFilename(url) ?? `${tenderNumber}-${kind}.pdf`;
+    documents.push({
+      url,
+      filename,
+      mimeType: "application/pdf",
+      sourceDocumentKey: `epms_${kind}_${filename.replace(/\.pdf$/i, "").replace(/[^a-z0-9_-]+/gi, "_")}`
+    });
+  });
+  return dedupeDocuments(documents);
+}
+
+function federalPpraPdfFilename(url: string): string | undefined {
+  try {
+    const encodedPath = new URL(url).searchParams.get("file");
+    if (!encodedPath) return undefined;
+    const decodedPath = Buffer.from(encodedPath, "base64").toString("utf8");
+    return cleanOptional(decodedPath.split(/[\\/]/).filter(Boolean).at(-1));
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseFederalPpraDate(value: string | undefined, endOfDayWhenTimeMissing: boolean): string | undefined {
+  if (!value) return undefined;
+  const normalized = normalizeWhitespace(value);
+  const match = normalized.match(/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),\s+(\d{4})(?:\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(AM|PM))?$/i);
+  if (!match) return undefined;
+  const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const month = monthNames.indexOf(String(match[1]).slice(0, 3).toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  if (!match[4]) {
+    if (!endOfDayWhenTimeMissing) return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    return new Date(Date.UTC(year, month, day, 18, 59, 59, 999)).toISOString();
+  }
+  let hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (String(match[6]).toLowerCase() === "pm" && hour < 12) hour += 12;
+  if (String(match[6]).toLowerCase() === "am" && hour === 12) hour = 0;
+  return new Date(Date.UTC(year, month, day, hour, minute) - 5 * 60 * 60 * 1000).toISOString();
+}
+
+function federalPpraOpeningDate(closingValue: string | undefined, openingValue: string | undefined): string | undefined {
+  if (!openingValue) return undefined;
+  const absoluteOpening = parseFederalPpraDate(openingValue, false);
+  if (absoluteOpening?.includes("T")) return absoluteOpening;
+  const datePart = normalizeWhitespace(closingValue ?? "").match(/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}/i)?.[0];
+  return datePart ? parseFederalPpraDate(`${datePart} ${normalizeWhitespace(openingValue)}`, false) : undefined;
+}
+
+function federalPpraPageUrl(baseUrl: string, page: number): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set("page", String(page));
+  return url.toString();
+}
+
+function federalPpraPageCount(html: string): number {
+  const body = normalizeWhitespace(cheerio.load(html)("body").text());
+  const explicitPageCount = Number(body.match(/Page\s+\d+\s+of\s+(\d+)/i)?.[1]);
+  const totalTenders = Number(body.match(/Showing\s+\d+\s+of\s+(\d+)\s+tenders/i)?.[1]);
+  const pageCount = Number.isInteger(explicitPageCount) && explicitPageCount > 0
+    ? explicitPageCount
+    : Number.isInteger(totalTenders) && totalTenders > 0
+      ? Math.ceil(totalTenders / 50)
+      : 1;
+  return Number.isInteger(pageCount) && pageCount > 0 ? pageCount : 1;
+}
+
+const punjabPpraProfile: SourceProfile = {
+  key: "punjab-ppra",
+  name: "Punjab PPRA",
+  sourceType: "provincial",
+  region: "Punjab",
+  sourceGroup: "punjab_ppra",
+  documentPrefix: "tender_PUNJAB",
+  portalFamily: "punjab_ppra",
+  knownSourceDomains: ["eproc.punjab.gov.pk", "ppra.punjab.gov.pk", "punjab.eprocure.gov.pk"],
+  listing: {
+    rowSelector: "#ctl00_ContentPlaceHolderSRIS_rdgrdManageTender_ctl00 tbody > tr.rgRow, #ctl00_ContentPlaceHolderSRIS_rdgrdManageTender_ctl00 tbody > tr.rgAltRow"
+  },
+  defaultProcurementMethod: "Punjab PPRA public procurement process",
+  defaultSubmissionMethod: "As stated in Punjab PPRA notice"
+};
+
+type PunjabPpraSession = { cookies: Map<string, string> };
+
+export class PunjabPpraAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = punjabPpraProfile.key;
+  readonly name = punjabPpraProfile.name;
+  readonly sourceType: SourceType = punjabPpraProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(punjabPpraProfile, context.metadata);
+    const pageUrl = new URL("/Admin_Tender_Search.aspx", context.baseUrl).toString();
+    const session: PunjabPpraSession = { cookies: new Map() };
+    let html = await fetchPunjabPpraPage(pageUrl, context.userAgent, session);
+    const payloads = parsePunjabPpraListing(html, pageUrl, profile);
+    const initialState = punjabPpraGridState(html);
+    if (!payloads.length) throw new SourceFetchError("Punjab PPRA returned no procurement rows.");
+    if (initialState.pageCount > 100) throw new SourceFetchError(`Punjab PPRA reported an unsafe page count (${initialState.pageCount}).`);
+
+    let currentPageIndex = initialState.currentPageIndex;
+    while (currentPageIndex + 1 < initialState.pageCount) {
+      const eventTarget = punjabPpraNextEventTarget(html, currentPageIndex + 2);
+      if (!eventTarget) throw new SourceFetchError(`Punjab PPRA page ${currentPageIndex + 1} did not expose a valid next-page postback.`);
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      html = await fetchPunjabPpraPage(pageUrl, context.userAgent, session, { html, eventTarget });
+      const nextState = punjabPpraGridState(html);
+      if (nextState.currentPageIndex <= currentPageIndex) {
+        throw new SourceFetchError(`Punjab PPRA pagination did not advance beyond page ${currentPageIndex + 1}.`);
+      }
+      currentPageIndex = nextState.currentPageIndex;
+      payloads.push(...parsePunjabPpraListing(html, pageUrl, profile));
+    }
+
+    const unique = new Map<string, RawTenderPayload>();
+    for (const payload of payloads) unique.set(payload.sourceUrl, payload);
+    return [...unique.values()];
+  }
+}
+
+export function parsePunjabPpraListing(
+  html: string,
+  pageUrl: string,
+  profile: SourceProfile = punjabPpraProfile
+): RawTenderPayload[] {
+  const $ = cheerio.load(html);
+  const payloads: RawTenderPayload[] = [];
+  $(profile.listing.rowSelector).each((_, row) => {
+    const rowHandle = $(row);
+    const cells = rowHandle.find("td");
+    if (cells.length < 9) return;
+    const noticeType = normalizeWhitespace(cells.eq(0).text());
+    const title = normalizeWhitespace(cells.eq(1).text());
+    const procurementCategory = normalizePunjabProcurementCategory(cells.eq(2).text());
+    const advertisementDate = parsePunjabPpraDate(cells.eq(3).text(), false);
+    const closingDate = parsePunjabPpraDate(cells.eq(4).text(), true);
+    const department = normalizeWhitespace(cells.eq(5).text());
+    const sourceStatus = normalizeWhitespace(cells.eq(6).text());
+    const noticeHref = cells.eq(7).find("a[href]").first().attr("href");
+    const biddingHref = cells.eq(8).find("a[href]").first().attr("href");
+    if (!title || !noticeHref) return;
+
+    const sourceUrl = normalizeSourceUrl(new URL(noticeHref, pageUrl).toString());
+    const documents: RawTenderPayload["documents"] = [
+      punjabPpraDocument(sourceUrl, "notice")
+    ];
+    if (biddingHref) {
+      documents.push(punjabPpraDocument(normalizeSourceUrl(new URL(biddingHref, pageUrl).toString()), "bidding"));
+    }
+    const description = normalizeWhitespace([
+      title,
+      noticeType ? `Notice type: ${noticeType}` : "",
+      procurementCategory ? `Procurement category: ${procurementCategory}` : "",
+      department ? `Department: ${department}` : "",
+      sourceStatus ? `Source status: ${sourceStatus}` : ""
+    ].filter(Boolean).join(". "));
+
+    const payload = buildPayload(profile, {
+      sourceUrl,
+      title,
+      department: department || profile.name,
+      advertisementDate,
+      closingDate,
+      description,
+      procurementMethod: profile.defaultProcurementMethod,
+      submissionMethod: profile.defaultSubmissionMethod,
+      sourceStatus,
+      websiteUrl: "https://eproc.punjab.gov.pk/",
+      documents,
+      rawHtml: $.html(rowHandle)
+    });
+    if (procurementCategory) payload.procurementCategory = procurementCategory;
+    payload.sourceMetadata = safeJson({
+      ...(payload.sourceMetadata as Record<string, Json>),
+      noticeType,
+      sourceStatus
+    });
+    payloads.push(payload);
+  });
+  return payloads;
+}
+
+function punjabPpraDocument(url: string, kind: "notice" | "bidding"): RawTenderPayload["documents"][number] {
+  const filename = filenameFromUrl(url);
+  return {
+    url,
+    filename,
+    mimeType: "application/pdf",
+    sourceDocumentKey: `punjab_${kind}_${filename.replace(/\.pdf$/i, "")}`
+  };
+}
+
+function normalizePunjabProcurementCategory(value: string): string | undefined {
+  const normalized = normalizeWhitespace(value).toLowerCase();
+  if (normalized === "work" || normalized === "works") return "Works";
+  if (normalized === "goods") return "Goods";
+  if (normalized === "service" || normalized === "services") return "Services";
+  return normalized ? normalizeWhitespace(value) : undefined;
+}
+
+function parsePunjabPpraDate(value: string, endOfDay: boolean): string | undefined {
+  const match = normalizeWhitespace(value).match(/^(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{4})$/i);
+  if (!match) return undefined;
+  const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const month = monthNames.indexOf(String(match[2]).slice(0, 3).toLowerCase());
+  const day = Number(match[1]);
+  const year = Number(match[3]);
+  if (!endOfDay) return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return new Date(Date.UTC(year, month, day, 18, 59, 59, 999)).toISOString();
+}
+
+function punjabPpraGridState(html: string): { currentPageIndex: number; pageCount: number } {
+  const currentPageIndex = Number(html.match(/"_currentPageIndex":(\d+)/)?.[1] ?? 0);
+  const pageCount = Number(html.match(/"PageCount":(\d+)/)?.[1] ?? 1);
+  return {
+    currentPageIndex: Number.isInteger(currentPageIndex) && currentPageIndex >= 0 ? currentPageIndex : 0,
+    pageCount: Number.isInteger(pageCount) && pageCount > 0 ? pageCount : 1
+  };
+}
+
+function punjabPpraNextEventTarget(html: string, nextPageNumber: number): string | undefined {
+  const $ = cheerio.load(html);
+  const links = $(".rgPager a[href*='__doPostBack']");
+  const pageLink = links.filter((_, element) => normalizeWhitespace($(element).text()) === String(nextPageNumber)).first();
+  const nextPagesLink = links.filter((_, element) => /next pages/i.test($(element).attr("title") ?? "")).first();
+  const href = (pageLink.length ? pageLink : nextPagesLink).attr("href");
+  return href?.match(/__doPostBack\('([^']+)'/)?.[1];
+}
+
+function punjabPpraPostbackBody(html: string, eventTarget: string): URLSearchParams {
+  const $ = cheerio.load(html);
+  const body = new URLSearchParams();
+  $("form#aspnetForm input[name], form#aspnetForm select[name], form#aspnetForm textarea[name]").each((_, element) => {
+    const handle = $(element);
+    const name = handle.attr("name");
+    if (!name || handle.is(":disabled")) return;
+    const type = (handle.attr("type") ?? "").toLowerCase();
+    if (["submit", "button", "image", "file"].includes(type)) return;
+    if (["checkbox", "radio"].includes(type) && !handle.is(":checked")) return;
+    const rawValue = handle.val();
+    const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+    body.set(name, String(value ?? ""));
+  });
+  body.set("__EVENTTARGET", eventTarget);
+  body.set("__EVENTARGUMENT", "");
+  return body;
+}
+
+async function fetchPunjabPpraPage(
+  url: string,
+  userAgent: string,
+  session: PunjabPpraSession,
+  postback?: { html: string; eventTarget: string }
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const headers: Record<string, string> = {
+        "user-agent": userAgent,
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      };
+      const cookie = [...session.cookies.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+      if (cookie) headers.cookie = cookie;
+      const init: Record<string, unknown> = {
+        method: postback ? "POST" : "GET",
+        headers,
+        redirect: "follow",
+        signal: AbortSignal.timeout(45_000),
+        dispatcher: insecureAgent
+      };
+      if (postback) {
+        headers["content-type"] = "application/x-www-form-urlencoded";
+        headers.origin = new URL(url).origin;
+        headers.referer = url;
+        init.body = punjabPpraPostbackBody(postback.html, postback.eventTarget).toString();
+      }
+      const response = await fetch(url, init as any);
+      updatePunjabPpraCookies(session, response);
+      const text = await response.text();
+      if (!response.ok) throw new SourceFetchError(`Punjab PPRA returned HTTP ${response.status}`);
+      if (isInaccessible(text)) throw new PermanentSourceError("Punjab PPRA is not publicly accessible without controls.");
+      return text;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof PermanentSourceError || attempt === 2) break;
+      await sleep(1_500);
+    }
+  }
+  if (lastError instanceof PermanentSourceError) throw lastError;
+  throw new SourceFetchError(lastError instanceof Error ? lastError.message : "Punjab PPRA request failed.");
+}
+
+function updatePunjabPpraCookies(session: PunjabPpraSession, response: Response): void {
+  const setCookies: string[] = (response.headers as any).getSetCookie?.() ?? [];
+  for (const setCookie of setCookies) {
+    const pair = setCookie.split(";", 1)[0];
+    const separator = pair?.indexOf("=") ?? -1;
+    if (!pair || separator <= 0) continue;
+    session.cookies.set(pair.slice(0, separator), pair.slice(separator + 1));
+  }
+}
+
+const kpPpraProfile: SourceProfile = {
+  key: "kp-ppra-active",
+  name: "Khyber Pakhtunkhwa PPRA",
+  sourceType: "provincial",
+  region: "Khyber Pakhtunkhwa",
+  sourceGroup: "kp_kppra",
+  documentPrefix: "tender_kppra",
+  portalFamily: "kp_kppra",
+  knownSourceDomains: [
+    "kppra.gov.pk",
+    "portal.kppra.gov.pk",
+    "kp.eprocure.gov.pk",
+    "portalkp.eprocure.gov.pk",
+    "phedkp.gov.pk",
+    "lgkp.gov.pk",
+    "irrigation.gkp.pk"
+  ],
+  listing: {
+    rowSelector: "table.custom-table > tbody > tr"
+  }
+};
+
+type KpPpraDetail = {
+  tender_id?: string;
+  tender_ref?: string;
+  tender_start_date?: string;
+  tender_close_date?: string;
+  tender_file?: string;
+  tneder_link?: string;
+  bidding_doc?: string;
+  bidding_doc_link?: string;
+  tender_descp?: string;
+  tender_domain?: string | number;
+  t_title?: string;
+  proc_method_name?: string;
+  pkg?: unknown;
+  items?: unknown;
+  bids?: unknown;
+};
+
+export class KpPpraAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = kpPpraProfile.key;
+  readonly name = kpPpraProfile.name;
+  readonly sourceType: SourceType = kpPpraProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(kpPpraProfile, context.metadata);
+    const firstPageUrl = kpPpraPageUrl(context.baseUrl, 1);
+    const firstPage = await fetchPublicText(firstPageUrl, context.userAgent);
+    const payloads = parseKpPpraListing(firstPage.text, firstPageUrl, profile);
+    const lastPage = kpPpraLastPage(firstPage.text);
+    if (!payloads.length) throw new SourceFetchError("KP PPRA returned no active tender rows.");
+    if (lastPage > 100) throw new SourceFetchError(`KP PPRA reported an unsafe page count (${lastPage}).`);
+
+    for (let page = 2; page <= lastPage; page += 1) {
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      const pageUrl = kpPpraPageUrl(context.baseUrl, page);
+      const response = await fetchPublicText(pageUrl, context.userAgent);
+      payloads.push(...parseKpPpraListing(response.text, pageUrl, profile));
+    }
+
+    const unique = new Map<string, RawTenderPayload>();
+    for (const payload of payloads) unique.set(payload.sourceUrl, payload);
+    return Promise.all([...unique.values()].map(async (payload, index) => {
+      const internalTenderId = metadataString(metadataRecord(payload.sourceMetadata)?.internalTenderId);
+      if (!internalTenderId) return payload;
+      if (index > 0) await sleep(sourceRuntimeConfig.politeRequestDelayMs * index);
+      try {
+        const detailUrl = kpPpraDetailUrl(context.baseUrl, internalTenderId);
+        const response = await fetchPublicText(detailUrl, context.userAgent);
+        return applyKpPpraDetail(payload, response.text, detailUrl, profile);
+      } catch {
+        payload.sourceMetadata = safeJson({
+          ...(payload.sourceMetadata as Record<string, Json>),
+          detailFetchStatus: "unavailable"
+        });
+        return payload;
+      }
+    }));
+  }
+}
+
+export function parseKpPpraListing(
+  html: string,
+  pageUrl: string,
+  profile: SourceProfile = kpPpraProfile
+): RawTenderPayload[] {
+  const $ = cheerio.load(html);
+  const payloads: RawTenderPayload[] = [];
+  $(profile.listing.rowSelector).each((_, row) => {
+    const rowHandle = $(row);
+    if (/display\s*:\s*none/i.test(rowHandle.attr("style") ?? "")) return;
+    const cells = rowHandle.children("td");
+    if (cells.length < 8) return;
+    const tenderNumber = normalizeWhitespace(cells.eq(0).text());
+    const title = normalizeWhitespace(cells.eq(1).text());
+    const department = normalizeWhitespace(cells.eq(2).text());
+    const internalTenderId = cells.eq(7).find("[onclick*='details(']").attr("onclick")?.match(/details\((\d+)\)/)?.[1];
+    if (!/^\d{1,12}$/.test(tenderNumber) || title.length < 4 || !internalTenderId) return;
+
+    const documents: RawTenderPayload["documents"] = [];
+    const tenderHref = cells.eq(5).find("a[href]").first().attr("href");
+    const biddingHref = cells.eq(6).find("a[href]").first().attr("href");
+    if (tenderHref) documents.push(kpPpraDocument(new URL(tenderHref, pageUrl).toString(), "notice"));
+    if (biddingHref) documents.push(kpPpraDocument(new URL(biddingHref, pageUrl).toString(), "bidding"));
+
+    const correction = parseKpPpraCorrectionRow($, rowHandle.next("tr"), pageUrl);
+    documents.push(...correction.documents);
+    const advertisementDate = parseKpPpraDate(cells.eq(3).text(), false);
+    const closingDate = correction.closingDate ?? parseKpPpraDate(cells.eq(4).text(), true);
+    const description = normalizeWhitespace([
+      title,
+      department ? `Procurement entity: ${department}` : "",
+      correction.description
+    ].filter(Boolean).join(". "));
+    const sourceUrl = kpPpraTenderSourceUrl(pageUrl, tenderNumber);
+    const payload = buildPayload(profile, {
+      sourceUrl,
+      title,
+      tenderNumber,
+      department: department || profile.name,
+      advertisementDate,
+      closingDate,
+      description,
+      websiteUrl: kpPpraListingUrl(pageUrl),
+      documents,
+      rawHtml: $.html(rowHandle) + (correction.rawHtml ?? "")
+    });
+    payload.sourceMetadata = safeJson({
+      ...(payload.sourceMetadata as Record<string, Json>),
+      internalTenderId,
+      detailEndpoint: kpPpraDetailUrl(pageUrl, internalTenderId),
+      detailFetchStatus: "pending",
+      hasCorrigendum: Boolean(correction.description)
+    });
+    payloads.push(payload);
+  });
+  return payloads;
+}
+
+function applyKpPpraDetail(
+  payload: RawTenderPayload,
+  responseText: string,
+  detailUrl: string,
+  profile: SourceProfile
+): RawTenderPayload {
+  const parsed = JSON.parse(responseText) as unknown;
+  const detail = Array.isArray(parsed) ? parsed[0] as KpPpraDetail | undefined : undefined;
+  if (!detail || String(detail.tender_ref ?? "") !== payload.tenderNumber) {
+    throw new SourceFetchError(`KP PPRA returned mismatched detail data for ${payload.tenderNumber ?? detailUrl}.`);
+  }
+  const documents = [...payload.documents];
+  appendKpPpraDetailDocument(documents, detail.tender_file, "notice", detailUrl);
+  appendKpPpraDetailDocument(documents, detail.bidding_doc, "bidding", detailUrl);
+  const description = normalizeWhitespace(detail.tender_descp ?? payload.description ?? payload.title);
+  const procurementCategory = cleanOptional(detail.t_title);
+  const procurementMethod = cleanOptional(detail.proc_method_name);
+  const advertisementDate = parseKpPpraIsoDate(detail.tender_start_date, false) ?? payload.advertisementDate;
+  const closingDate = parseKpPpraIsoDate(detail.tender_close_date, true) ?? payload.closingDate;
+  const detailDomain = String(detail.tender_domain ?? "") === "0"
+    ? "Local"
+    : String(detail.tender_domain ?? "") === "1"
+      ? "International"
+      : undefined;
+  const rawDetail = safeJson({
+    tenderId: detail.tender_id,
+    tenderNumber: detail.tender_ref,
+    tenderType: procurementCategory,
+    procurementMethod,
+    tenderDomain: detailDomain,
+    tenderLink: cleanOptional(detail.tneder_link),
+    biddingLink: cleanOptional(detail.bidding_doc_link),
+    packages: detail.pkg,
+    items: detail.items,
+    bids: detail.bids
+  });
+  const enriched = buildPayload(profile, {
+    sourceUrl: payload.sourceUrl,
+    title: payload.title,
+    tenderNumber: payload.tenderNumber,
+    department: payload.department,
+    advertisementDate,
+    closingDate,
+    city: payload.city,
+    estimatedValue: payload.estimatedValue,
+    description,
+    documents,
+    procurementMethod,
+    submissionMethod: payload.submissionMethod,
+    websiteUrl: payload.websiteUrl,
+    rawHtml: `${payload.rawSnapshot?.content ?? ""}\n<script type="application/json" data-kp-ppra-detail="${detailUrl}">${escapeHtml(responseText)}</script>`
+  });
+  if (procurementCategory) enriched.procurementCategory = procurementCategory;
+  enriched.sourceMetadata = safeJson({
+    ...(payload.sourceMetadata as Record<string, Json>),
+    detailFetchStatus: "fetched",
+    tenderDomain: detailDomain,
+    detail: rawDetail
+  });
+  return enriched;
+}
+
+function parseKpPpraCorrectionRow(
+  $: cheerio.CheerioAPI,
+  rowHandle: cheerio.Cheerio<any>,
+  pageUrl: string
+): { description?: string; closingDate?: string; documents: RawTenderPayload["documents"]; rawHtml?: string } {
+  if (!/^item_temp_section_/i.test(rowHandle.attr("id") ?? "")) return { documents: [] };
+  const descriptions: string[] = [];
+  const documents: RawTenderPayload["documents"] = [];
+  let closingDate: string | undefined;
+  rowHandle.find("table.NOEDITS tr").slice(1).each((_, correctionRow) => {
+    const cells = $(correctionRow).children("td");
+    if (cells.length < 4) return;
+    const description = normalizeWhitespace(cells.eq(1).text());
+    if (description) descriptions.push(`Corrigendum: ${description}`);
+    closingDate = parseKpPpraDate(cells.eq(2).text(), true) ?? closingDate;
+    const href = cells.find("a[href]").first().attr("href");
+    if (href) documents.push(kpPpraDocument(new URL(href, pageUrl).toString(), "corrigendum"));
+  });
+  const result: { description?: string; closingDate?: string; documents: RawTenderPayload["documents"]; rawHtml?: string } = {
+    documents,
+    rawHtml: $.html(rowHandle)
+  };
+  const description = descriptions.join(". ");
+  if (description) result.description = description;
+  if (closingDate) result.closingDate = closingDate;
+  return result;
+}
+
+function kpPpraDocument(url: string, kind: "notice" | "bidding" | "corrigendum"): RawTenderPayload["documents"][number] {
+  const normalizedUrl = normalizeSourceUrl(url);
+  const filename = kpPpraFilename(normalizedUrl);
+  return {
+    url: normalizedUrl,
+    filename,
+    mimeType: mimeFromUrl(filename),
+    sourceDocumentKey: `kp_${kind}_${filename.replace(/\.[^.]+$/, "")}`
+  };
+}
+
+function appendKpPpraDetailDocument(
+  documents: RawTenderPayload["documents"],
+  filename: string | undefined,
+  kind: "notice" | "bidding",
+  baseUrl: string
+): void {
+  const cleanFilename = cleanOptional(filename);
+  if (!cleanFilename || documents.some((document) => document.filename === cleanFilename)) return;
+  const downloadUrl = new URL("/kppra/staff/force_download.php", baseUrl);
+  downloadUrl.searchParams.set("file", `dept/upload/${cleanFilename}`);
+  documents.push(kpPpraDocument(downloadUrl.toString(), kind));
+}
+
+function kpPpraFilename(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const file = parsed.searchParams.get("file");
+    if (file) return decodeURIComponent(file.split("/").filter(Boolean).at(-1) ?? "tender-document");
+  } catch {
+    // Fall through to the generic filename parser.
+  }
+  return filenameFromUrl(url);
+}
+
+function parseKpPpraDate(value: string, endOfDay: boolean): string | undefined {
+  const match = normalizeWhitespace(value).match(/^(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{4})$/i);
+  if (!match) return parseKpPpraIsoDate(value, endOfDay);
+  const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  return kpPpraDateValue(Number(match[3]), months.indexOf(String(match[2]).toLowerCase()), Number(match[1]), endOfDay);
+}
+
+function parseKpPpraIsoDate(value: string | undefined, endOfDay: boolean): string | undefined {
+  const match = normalizeWhitespace(value ?? "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return undefined;
+  return kpPpraDateValue(Number(match[1]), Number(match[2]) - 1, Number(match[3]), endOfDay);
+}
+
+function kpPpraDateValue(year: number, month: number, day: number, endOfDay: boolean): string | undefined {
+  const date = new Date(Date.UTC(year, month, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return undefined;
+  if (!endOfDay) return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return new Date(Date.UTC(year, month, day, 18, 59, 59, 999)).toISOString();
+}
+
+function kpPpraPageUrl(baseUrl: string, page: number): string {
+  const url = kpPpraPortalUrl("/kppra/activetenders.php/", baseUrl);
+  if (page > 1) url.searchParams.set("p", String(page));
+  return url.toString();
+}
+
+function kpPpraListingUrl(baseUrl: string): string {
+  return kpPpraPortalUrl("/kppra/activetenders", baseUrl).toString();
+}
+
+function kpPpraTenderSourceUrl(baseUrl: string, tenderNumber: string): string {
+  const url = kpPpraPortalUrl("/kppra/activetenders.php", baseUrl);
+  url.searchParams.set("tender_ref", tenderNumber);
+  return url.toString();
+}
+
+function kpPpraDetailUrl(baseUrl: string, internalTenderId: string): string {
+  const url = kpPpraPortalUrl("/kppra/includes/class.tender.php", baseUrl);
+  url.searchParams.set("getTenderDetails", "yes");
+  url.searchParams.set("tender_id", internalTenderId);
+  return url.toString();
+}
+
+function kpPpraPortalUrl(path: string, baseUrl: string): URL {
+  const url = new URL(path, baseUrl);
+  url.protocol = "http:";
+  return url;
+}
+
+function kpPpraLastPage(html: string): number {
+  const $ = cheerio.load(html);
+  const showingText = normalizeWhitespace($("table.custom-table tfoot").text());
+  const total = Number(showingText.match(/Showing\s+\d+\s*-\s*\d+\s+of\s+(\d+)/i)?.[1] ?? 0);
+  if (Number.isInteger(total) && total > 0) return Math.ceil(total / 25);
+  let lastPage = 1;
+  $("a[href*='p=']").each((_, element) => {
+    try {
+      const page = Number(new URL($(element).attr("href") ?? "", "http://kppra.gov.pk").searchParams.get("p"));
+      if (Number.isInteger(page) && page > lastPage) lastPage = page;
+    } catch {
+      // Ignore malformed pager links.
+    }
+  });
+  return lastPage;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+const balochistanBppraProfile: SourceProfile = {
+  key: "balochistan-bppra",
+  name: "Balochistan PPRA",
+  sourceType: "provincial",
+  region: "Balochistan",
+  sourceGroup: "balochistan_bppra",
+  documentPrefix: "tender_BALOCHISTAN",
+  portalFamily: "balochistan_bppra",
+  knownSourceDomains: [
+    "bpptwo.vdc.services",
+    "bppqa.vdc.services",
+    "bppra.gob.pk"
+  ],
+  listing: {
+    rowSelector: "table tbody tr"
+  }
+};
+
+type BppraTenderRecord = {
+  Id?: number;
+  PlanningId?: number;
+  TSENumber?: string;
+  Name?: string;
+  TenderName?: string;
+  Agency?: string;
+  Department?: string;
+  District?: string;
+  Category?: string;
+  ProcurementCategoryID?: number;
+  WorksCategoryID?: number;
+  TenderStatus?: string;
+  PublishedDate?: string;
+  CloseDate?: string;
+  CloseTime?: string;
+  OpenTime?: string;
+  RevisedSubmissionLastDate?: string;
+  RevisedSubmissionLastTime?: string;
+  RevisedBidsOpeningDate?: string;
+  RevisedBidsOpeningTime?: string;
+  CancelDate?: string;
+  CancelReason?: string;
+  CorPublished?: string;
+  IsRevised?: boolean;
+  IsESubmissionAllowed?: boolean;
+  IsManual?: boolean;
+  PType?: string;
+  EstCost?: string;
+  DocCost?: string;
+  tenderNoticeDoc?: string;
+  tenderBidDoc?: string;
+  PersonName?: string;
+  Designation?: string;
+  Address?: string;
+  Phone?: string;
+  Email?: string;
+  EvaluationCriteria?: string;
+  evalCriteria?: string;
+};
+
+type BppraTenderResponse = {
+  status?: boolean;
+  TotalPages?: number;
+  tenders?: BppraTenderRecord[];
+};
+
+type BppraPlanResponse = {
+  Succeeded?: boolean;
+  Data?: {
+    Objects?: Array<{ ObjectClass?: string; Method?: string }>;
+  };
+};
+
+const bppraApiBaseUrl = "https://bpptwo.vdc.services:9446";
+const bppraPortalUrl = "https://bpptwo.vdc.services:5451/Tenders";
+const bppraRecordsPerPage = 100;
+const bppraAdvertisementLookbackDays = 400;
+const bppraMaxApiPages = 300;
+
+export class BalochistanBppraAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = balochistanBppraProfile.key;
+  readonly name = balochistanBppraProfile.name;
+  readonly sourceType: SourceType = balochistanBppraProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(balochistanBppraProfile, context.metadata);
+    const dateRange = bppraAdvertisementDateRange(new Date());
+    const firstPageUrl = bppraApiPageUrl(1, dateRange);
+    const [firstPage, methodMap] = await Promise.all([
+      fetchBppraJson<BppraTenderResponse>(firstPageUrl, context.userAgent),
+      fetchBppraMethodMap(context.userAgent)
+    ]);
+    if (firstPage.status !== true || !Array.isArray(firstPage.tenders)) {
+      throw new SourceFetchError("Balochistan PPRA returned an invalid tender response.");
+    }
+    const totalRecords = Number(firstPage.TotalPages ?? firstPage.tenders.length);
+    const pageCount = Math.max(1, Math.ceil(totalRecords / bppraRecordsPerPage));
+    if (!Number.isInteger(pageCount) || pageCount > bppraMaxApiPages) {
+      throw new SourceFetchError(`Balochistan PPRA reported an unsafe page count (${pageCount}).`);
+    }
+
+    const remainingPages = await Promise.all(Array.from({ length: pageCount - 1 }, async (_, index) => {
+      const page = index + 2;
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs * (index + 1));
+      const pageUrl = bppraApiPageUrl(page, dateRange);
+      const response = await fetchBppraJson<BppraTenderResponse>(pageUrl, context.userAgent);
+      if (response.status !== true || !Array.isArray(response.tenders)) {
+        throw new SourceFetchError(`Balochistan PPRA returned an invalid response for page ${page}.`);
+      }
+      return response.tenders;
+    }));
+
+    const records = [firstPage.tenders, ...remainingPages].flat();
+    const unique = new Map<number, BppraTenderRecord>();
+    for (const record of records) {
+      if (!record.Id || !bppraTenderIsCurrent(record, dateRange.to)) continue;
+      unique.set(record.Id, record);
+    }
+    const payloads = [...unique.values()].map((record) => buildBppraPayload(record, profile, methodMap));
+    if (!payloads.length) throw new SourceFetchError("Balochistan PPRA returned no current tender rows.");
+    return payloads;
+  }
+}
+
+function buildBppraPayload(
+  record: BppraTenderRecord,
+  profile: SourceProfile,
+  methodMap: Map<string, string>
+): RawTenderPayload {
+  const tenderNumber = cleanOptional(record.TSENumber);
+  const title = cleanOptional(record.TenderName) ?? cleanOptional(record.Name);
+  if (!record.Id || !tenderNumber || !title) {
+    throw new SourceFetchError("Balochistan PPRA returned a tender without a stable ID, TSE number, or title.");
+  }
+  const procurementCategory = bppraProcurementCategory(record.ProcurementCategoryID);
+  const procurementMethod = methodMap.get(normalizeWhitespace(record.Category ?? "").toLowerCase());
+  const advertisementDate = bppraAdvertisementDate(record.PublishedDate);
+  const closingDate = parseBppraDeadline(
+    record.RevisedSubmissionLastDate ?? record.CloseDate,
+    record.RevisedSubmissionLastTime ?? record.CloseTime,
+    true
+  );
+  const openingDate = parseBppraDeadline(
+    record.RevisedBidsOpeningDate ?? record.RevisedSubmissionLastDate ?? record.CloseDate,
+    record.RevisedBidsOpeningTime ?? record.OpenTime,
+    false
+  );
+  const estimatedValue = bppraNumber(record.EstCost);
+  const documentFee = bppraNumber(record.DocCost);
+  const submissionMethod = bppraSubmissionMethod(record);
+  const contactPerson = normalizeWhitespace([
+    record.PersonName,
+    record.Designation,
+    record.Phone,
+    record.Email
+  ].filter(Boolean).join(" | ")) || undefined;
+  const documents = bppraDocuments(record, tenderNumber);
+  const sourceUrl = new URL(bppraPortalUrl);
+  sourceUrl.searchParams.set("search", tenderNumber);
+  const description = normalizeWhitespace([
+    title,
+    record.Category ? `Object: ${record.Category}` : "",
+    record.Agency ? `Procuring agency: ${record.Agency}` : "",
+    record.Department ? `Department: ${record.Department}` : "",
+    record.District ? `District: ${record.District}` : "",
+    record.TenderStatus ? `Source status: ${record.TenderStatus}` : "",
+    record.CancelReason ? `Cancellation reason: ${record.CancelReason}` : ""
+  ].filter(Boolean).join(". "));
+  const payload = buildPayload(profile, {
+    sourceUrl: sourceUrl.toString(),
+    title,
+    tenderNumber,
+    department: cleanOptional(record.Agency) ?? cleanOptional(record.Department) ?? profile.name,
+    advertisementDate,
+    closingDate,
+    city: cleanOptional(record.District),
+    estimatedValue,
+    description,
+    documents,
+    procurementMethod,
+    submissionMethod,
+    contactPerson,
+    sourceStatus: cleanOptional(record.TenderStatus),
+    websiteUrl: bppraPortalUrl,
+    rawHtml: `<script type="application/json" data-bppra-tender-id="${record.Id}">${escapeHtml(JSON.stringify(record))}</script>`
+  });
+  if (openingDate) payload.openingDate = openingDate;
+  if (documentFee !== undefined) payload.documentFee = documentFee;
+  if (procurementCategory) payload.procurementCategory = procurementCategory;
+  payload.sourceMetadata = safeJson({
+    ...(payload.sourceMetadata as Record<string, Json>),
+    bppraTenderId: record.Id,
+    planningId: record.PlanningId,
+    parentDepartment: record.Department,
+    classOfObject: record.Category,
+    evaluationCriteria: record.EvaluationCriteria ?? record.evalCriteria,
+    isElectronicSubmissionAllowed: record.IsESubmissionAllowed,
+    isManual: record.IsManual,
+    tenderType: record.PType,
+    isRevised: record.IsRevised,
+    corrigendumPublished: record.CorPublished,
+    cancelDate: record.CancelDate,
+    cancelReason: record.CancelReason
+  });
+  payload.rawSnapshot = {
+    content: JSON.stringify(record),
+    contentType: "application/json; charset=utf-8",
+    extension: "json"
+  };
+  return payload;
+}
+
+function bppraDocuments(record: BppraTenderRecord, tenderNumber: string): RawTenderPayload["documents"] {
+  if (!record.Id) return [];
+  const documents: RawTenderPayload["documents"] = [];
+  const biddingPath = bppraBiddingReportPath(record);
+  if (biddingPath) {
+    documents.push({
+      url: `${bppraApiBaseUrl}${biddingPath}`,
+      filename: `${tenderNumber}-bidding-document.html`,
+      mimeType: "text/html",
+      sourceDocumentKey: `bppra_bidding_${record.Id}`
+    });
+  }
+  const nitPath = bppraNitReportPath(record);
+  if (nitPath) {
+    documents.push({
+      url: `${bppraApiBaseUrl}${nitPath}`,
+      filename: `${tenderNumber}-nit-report.html`,
+      mimeType: "text/html",
+      sourceDocumentKey: `bppra_nit_${record.Id}`
+    });
+  }
+  const attachment = cleanOptional(record.tenderNoticeDoc);
+  if (attachment) {
+    const attachmentUrl = new URL(`/Images/${attachment.replace(/^\/+/, "")}`, bppraApiBaseUrl).toString();
+    documents.push({
+      url: attachmentUrl,
+      filename: attachment.split("/").filter(Boolean).at(-1) ?? `${tenderNumber}-boq.pdf`,
+      mimeType: mimeFromUrl(attachment),
+      sourceDocumentKey: `bppra_boq_${record.Id}`
+    });
+  }
+  return dedupeDocuments(documents);
+}
+
+function bppraBiddingReportPath(record: BppraTenderRecord): string | undefined {
+  if (!record.Id) return undefined;
+  const type = record.PType?.toLowerCase();
+  if (type === "rfp") return `/Reports/CS/RFPDocument.html?id=${record.Id}`;
+  if (type === "anrpc" && record.PlanningId) return `/Reports/PQN/ANRPCDocumentReport.html?id=${record.PlanningId}`;
+  if (record.ProcurementCategoryID === 3) return `/Reports/Works/BiddingDocumentWorks.html?id=${record.Id}`;
+  if (record.ProcurementCategoryID === 1 || record.ProcurementCategoryID === 2) {
+    return `/Reports/GoodsProcurement/BiddingDocument.html?id=${record.Id}`;
+  }
+  return undefined;
+}
+
+function bppraNitReportPath(record: BppraTenderRecord): string | undefined {
+  if (!record.Id) return undefined;
+  const type = record.PType?.toLowerCase();
+  if (type === "rfp") return `/Reports/GoodsProcurement/RFPNITDocument.html?id=${record.Id}`;
+  if (type === "anrpc" && record.PlanningId) return `/Reports/PQN/NITDocumentANRPC.html?id=${record.PlanningId}`;
+  if (type === "eoics") return `/Reports/GoodsProcurement/NITDocumentCSEOI.html?id=${record.Id}`;
+  return `/Reports/GoodsProcurement/NITDocument.html?id=${record.Id}`;
+}
+
+function bppraProcurementCategory(value: number | undefined): string | undefined {
+  if (value === 1) return "Goods";
+  if (value === 2) return "Services";
+  if (value === 3) return "Works";
+  if (value === 4) return "Consulting Services";
+  return undefined;
+}
+
+function bppraSubmissionMethod(record: BppraTenderRecord): string | undefined {
+  if (record.IsESubmissionAllowed && record.IsManual) return "Electronic and manual bidding";
+  if (record.IsESubmissionAllowed) return "Electronic bidding";
+  if (record.IsManual) return "Manual bidding";
+  return undefined;
+}
+
+export function parseBppraDeadline(
+  dateValue: string | undefined,
+  timeValue: string | undefined,
+  endOfDayWhenTimeMissing: boolean
+): string | undefined {
+  const date = bppraCalendarDate(dateValue);
+  if (!date) return undefined;
+  const time = bppraTimeParts(timeValue);
+  if (!time) {
+    if (!endOfDayWhenTimeMissing) return undefined;
+    return new Date(Date.UTC(date.year, date.month, date.day, 18, 59, 59, 999)).toISOString();
+  }
+  return new Date(Date.UTC(date.year, date.month, date.day, time.hour, time.minute) - 5 * 60 * 60 * 1000).toISOString();
+}
+
+function bppraCalendarDate(value: string | undefined): { year: number; month: number; day: number } | undefined {
+  const normalized = normalizeWhitespace(value ?? "");
+  const iso = normalized.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const us = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  const year = Number(iso?.[1] ?? us?.[3]);
+  const month = Number(iso?.[2] ?? us?.[1]) - 1;
+  const day = Number(iso?.[3] ?? us?.[2]);
+  const date = new Date(Date.UTC(year, month, day));
+  if (!Number.isFinite(year) || date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return undefined;
+  return { year, month, day };
+}
+
+function bppraTimeParts(value: string | undefined): { hour: number; minute: number } | undefined {
+  if (!value) return undefined;
+  const milliseconds = Number(value.match(/\d{10,13}/)?.[0]);
+  if (Number.isFinite(milliseconds) && milliseconds > 0) {
+    const date = new Date(milliseconds < 10_000_000_000 ? milliseconds * 1000 : milliseconds);
+    if (!Number.isNaN(date.getTime())) {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Karachi",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23"
+      }).formatToParts(date);
+      const part = (type: string) => Number(parts.find((entry) => entry.type === type)?.value);
+      const hour = part("hour");
+      const minute = part("minute");
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) return { hour, minute };
+    }
+  }
+  const time = normalizeWhitespace(value).match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!time) return undefined;
+  let hour = Number(time[1]);
+  const minute = Number(time[2]);
+  if (time[3]?.toLowerCase() === "pm" && hour < 12) hour += 12;
+  if (time[3]?.toLowerCase() === "am" && hour === 12) hour = 0;
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 ? { hour, minute } : undefined;
+}
+
+function bppraAdvertisementDate(value: string | undefined): string | undefined {
+  const date = bppraCalendarDate(value);
+  return date ? `${date.year}-${String(date.month + 1).padStart(2, "0")}-${String(date.day).padStart(2, "0")}` : undefined;
+}
+
+function bppraNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const numericText = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)?.[0];
+  const number = Number(numericText);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function bppraTenderIsCurrent(record: BppraTenderRecord, pakistanToday: string): boolean {
+  const closing = bppraCalendarDate(record.RevisedSubmissionLastDate ?? record.CloseDate);
+  if (!closing) return true;
+  const closingDate = `${closing.year}-${String(closing.month + 1).padStart(2, "0")}-${String(closing.day).padStart(2, "0")}`;
+  return closingDate >= pakistanToday;
+}
+
+function bppraAdvertisementDateRange(now: Date): { from: string; to: string } {
+  const to = pakistanCalendarDate(now);
+  const end = new Date(`${to}T00:00:00.000Z`);
+  end.setUTCDate(end.getUTCDate() - bppraAdvertisementLookbackDays);
+  return { from: end.toISOString().slice(0, 10), to };
+}
+
+function pakistanCalendarDate(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Karachi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function bppraApiPageUrl(page: number, dateRange: { from: string; to: string }): string {
+  const model = encodeURIComponent(JSON.stringify({
+    AgenciesArray: [],
+    ObjectArray: [],
+    ProcMethodArray: [],
+    DistrictArray: [],
+    DepartmentArray: [],
+    PSDPArray: [],
+    MinCost: 0,
+    MaxCost: 0,
+    YearId: 0,
+    From: dateRange.from,
+    To: dateRange.to
+  }));
+  return `${bppraApiBaseUrl}/api/LatestTenders/Get_AllTenderDNN/${page}/${bppraRecordsPerPage}/tenders/null/null//0//0//0//null/null/?model=${model}`;
+}
+
+async function fetchBppraMethodMap(userAgent: string): Promise<Map<string, string>> {
+  try {
+    const response = await fetchBppraJson<BppraPlanResponse>(`${bppraApiBaseUrl}/api/DnnPlan/get`, userAgent);
+    const result = new Map<string, string>();
+    for (const object of response.Data?.Objects ?? []) {
+      const name = normalizeWhitespace(object.ObjectClass ?? "").toLowerCase();
+      const method = normalizeWhitespace(object.Method ?? "");
+      if (name && method && !result.has(name)) result.set(name, method);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+async function fetchBppraJson<T>(url: string, userAgent: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": userAgent,
+          accept: "application/json"
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(30_000),
+        dispatcher: insecureAgent
+      } as any);
+      const text = await response.text();
+      if (!response.ok) throw new SourceFetchError(`Balochistan PPRA returned HTTP ${response.status}.`);
+      return JSON.parse(text) as T;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      await sleep(1_500);
+    }
+  }
+  throw new SourceFetchError(lastError instanceof Error ? lastError.message : "Balochistan PPRA request failed.");
+}
+
+const sindhPpraProfile: SourceProfile = {
+  key: "sindh-sppra",
+  name: "Sindh SPPRA",
+  sourceType: "provincial",
+  region: "Sindh",
+  sourceGroup: "sindh_sppra",
+  documentPrefix: "tender_SINDH",
+  portalFamily: "sindh_sppra",
+  knownSourceDomains: [
+    "portalsindh.eprocure.gov.pk",
+    "apiprd.eprocure.gov.pk",
+    "pprasindh.gov.pk",
+    "e.pprasindh.gov.pk",
+    "epads.pprasindh.gov.pk",
+    "sindh.eprocure.gov.pk"
+  ],
+  listing: {
+    rowSelector: "section"
+  },
+  defaultSubmissionMethod: "Electronic via Sindh EPADS"
+};
+
+type SindhPpraTenderRecord = {
+  publishedDocumentID?: number;
+  tR_DocumentTemplateID?: number;
+  procurementPlansDetailID?: number;
+  name?: string;
+  description?: string;
+  documentId?: number;
+  documentGUID?: string | null;
+  ppraTenderNumber?: string | null;
+  tenderNumber?: string;
+  tenderNumbers?: string;
+  isPublished?: boolean;
+  isInternationalPublish?: boolean;
+  officeID?: number;
+  publishDate?: string;
+  lastSubmissionDate?: string;
+  bidOpeningDate?: string;
+  bidValidityDate?: string;
+  clarificationDate?: string;
+  departmentName?: string;
+  statusName?: string;
+  location?: string;
+  voilation?: string | null;
+  procurementCategory?: string | null;
+  bidSubmissionType?: number;
+  estimatedCost?: string | number | null;
+  procurementMethod?: string | null;
+  procurementProcedure?: string | null;
+};
+
+type SindhPpraDocumentRecord = {
+  dmS_FileID?: number;
+  dmS_FileGUID?: string;
+  tr_PublishedDocumentID?: number;
+  tR_DocumentTemplateID?: number;
+  documentTemplateName?: string;
+  procurementPlansDetailID?: number;
+  publishedDocumentID?: number;
+  publishDate?: string;
+  isCorrigendum?: number;
+};
+
+type SindhPpraApiResponse<T> = {
+  data?: T;
+  success?: boolean;
+  responseMessage?: string;
+};
+
+type SindhPpraListingData = {
+  totalRecords?: number;
+  totalPages?: number;
+  records?: SindhPpraTenderRecord[];
+};
+
+type SindhPpraDocumentLookup = {
+  primary: SindhPpraDocumentRecord[];
+  publications: SindhPpraDocumentRecord[];
+  primarySucceeded: boolean;
+  publicationsSucceeded: boolean;
+  errors: string[];
+};
+
+const sindhPpraPortalUrl = "https://portalsindh.eprocure.gov.pk/";
+const sindhPpraApiBaseUrl = "https://apiprd.eprocure.gov.pk/websiteportal/publicportal/1.0.0/api/v1/publicportal";
+const sindhPpraDownloadUrl = "https://apiprd.eprocure.gov.pk/documentmanagementsystem/dmspublicapi/1.0.0/api/v1/dmspublicapi/downloadportalfilebyguid";
+const sindhPpraOfficeId = 31640;
+const sindhPpraPageSize = 500;
+const sindhPpraMaxPages = 20;
+const sindhPpraDocumentConcurrency = 5;
+
+export class SindhPpraAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = sindhPpraProfile.key;
+  readonly name = sindhPpraProfile.name;
+  readonly sourceType: SourceType = sindhPpraProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(sindhPpraProfile, context.metadata);
+    const firstPage = await fetchSindhPpraListingPage(1, context.userAgent);
+    const firstRecords = firstPage.data?.records;
+    if (firstPage.success !== true || !Array.isArray(firstRecords)) {
+      throw new SourceFetchError("Sindh SPPRA returned an invalid tender-list response.");
+    }
+    const reportedPages = Number(firstPage.data?.totalPages);
+    const totalRecords = Number(firstPage.data?.totalRecords ?? firstRecords.length);
+    const pageCount = Number.isInteger(reportedPages) && reportedPages > 0
+      ? reportedPages
+      : Math.max(1, Math.ceil(totalRecords / sindhPpraPageSize));
+    if (!Number.isInteger(pageCount) || pageCount > sindhPpraMaxPages) {
+      throw new SourceFetchError(`Sindh SPPRA reported an unsafe page count (${pageCount}).`);
+    }
+
+    const pageRecords = [firstRecords];
+    for (let page = 2; page <= pageCount; page += 1) {
+      await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      const response = await fetchSindhPpraListingPage(page, context.userAgent);
+      if (response.success !== true || !Array.isArray(response.data?.records)) {
+        throw new SourceFetchError(`Sindh SPPRA returned an invalid response for page ${page}.`);
+      }
+      pageRecords.push(response.data.records);
+    }
+
+    const now = new Date();
+    const unique = new Map<string, SindhPpraTenderRecord>();
+    for (const record of pageRecords.flat()) {
+      const key = sindhPpraRecordKey(record);
+      if (!key || !sindhPpraTenderIsCurrent(record, now)) continue;
+      unique.set(key, record);
+    }
+    const currentRecords = [...unique.values()];
+    if (!currentRecords.length) throw new SourceFetchError("Sindh SPPRA returned no complete, currently open tender rows.");
+
+    const payloads: RawTenderPayload[] = [];
+    let primaryLookupSuccesses = 0;
+    for (let offset = 0; offset < currentRecords.length; offset += sindhPpraDocumentConcurrency) {
+      const batch = currentRecords.slice(offset, offset + sindhPpraDocumentConcurrency);
+      const batchResults = await Promise.all(batch.map(async (record) => {
+        const lookup = await fetchSindhPpraDocumentLookup(record, context.userAgent);
+        if (lookup.primarySucceeded && lookup.primary.some(sindhPpraDocumentIsUsable)) primaryLookupSuccesses += 1;
+        return buildSindhPpraPayload(record, lookup, profile);
+      }));
+      payloads.push(...batchResults);
+      if (offset + sindhPpraDocumentConcurrency < currentRecords.length) {
+        await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      }
+    }
+
+    if (currentRecords.length >= 10 && primaryLookupSuccesses / currentRecords.length < 0.8) {
+      throw new SourceFetchError(`Sindh SPPRA bidding-document lookup coverage fell below the safe threshold (${primaryLookupSuccesses}/${currentRecords.length}).`);
+    }
+    return payloads;
+  }
+}
+
+function sindhPpraListingRequest(page: number): Record<string, unknown> {
+  return {
+    pagination: {
+      pageNumber: String(page),
+      pageSize: String(sindhPpraPageSize),
+      orderBy: "",
+      orderByColumnName: "PublishedDate",
+      approvalStatusID: 0,
+      refTypeID: 0
+    },
+    filter: {
+      sortOrder: "PublishedDate",
+      activityStatus: "In-Progress",
+      keywords: "",
+      tenderNo: "",
+      departmentName: null,
+      dateOfAdvertisement: null,
+      closingDate: null,
+      selectedWorth: null
+    },
+    loggedInUserID: 1,
+    loggedInUserOfficeID: sindhPpraOfficeId
+  };
+}
+
+async function fetchSindhPpraListingPage(page: number, userAgent: string): Promise<SindhPpraApiResponse<SindhPpraListingData>> {
+  return fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraListingData>>(
+    `${sindhPpraApiBaseUrl}/getallpublictenders`,
+    sindhPpraListingRequest(page),
+    userAgent
+  );
+}
+
+async function fetchSindhPpraDocumentLookup(record: SindhPpraTenderRecord, userAgent: string): Promise<SindhPpraDocumentLookup> {
+  const publishedDocumentId = Number(record.publishedDocumentID);
+  if (!Number.isInteger(publishedDocumentId) || publishedDocumentId <= 0) {
+    return {
+      primary: [],
+      publications: [],
+      primarySucceeded: false,
+      publicationsSucceeded: false,
+      errors: ["Tender did not include a publishedDocumentID."]
+    };
+  }
+  const request = {
+    Id: publishedDocumentId,
+    loggedInUserID: 1,
+    loggedInUserOfficeID: 1
+  };
+  const publicationRequest = {
+    ...request,
+    SupplierID: 1,
+    procurementPlansDetailID: record.procurementPlansDetailID ?? null
+  };
+  const [primaryResult, publicationResult] = await Promise.allSettled([
+    fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraDocumentRecord[]>>(
+      `${sindhPpraApiBaseUrl}/getallpublisheddocumentdetailbypdid`,
+      request,
+      userAgent
+    ),
+    fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraDocumentRecord[]>>(
+      `${sindhPpraApiBaseUrl}/getallpublisheddocumentdetailbypdidpublication`,
+      publicationRequest,
+      userAgent
+    )
+  ]);
+  const primarySucceeded = primaryResult.status === "fulfilled" && primaryResult.value.success === true && Array.isArray(primaryResult.value.data);
+  const publicationsSucceeded = publicationResult.status === "fulfilled" && publicationResult.value.success === true && Array.isArray(publicationResult.value.data);
+  const errors: string[] = [];
+  if (!primarySucceeded) errors.push(sindhPpraLookupError("bidding documents", primaryResult));
+  if (!publicationsSucceeded) errors.push(sindhPpraLookupError("PA publications", publicationResult));
+  return {
+    primary: primarySucceeded ? primaryResult.value.data ?? [] : [],
+    publications: publicationsSucceeded ? publicationResult.value.data ?? [] : [],
+    primarySucceeded,
+    publicationsSucceeded,
+    errors
+  };
+}
+
+function sindhPpraLookupError(
+  label: string,
+  result: PromiseSettledResult<SindhPpraApiResponse<SindhPpraDocumentRecord[]>>
+): string {
+  if (result.status === "rejected") {
+    return `${label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`;
+  }
+  return `${label}: ${result.value.responseMessage || "source returned an invalid response"}`;
+}
+
+function buildSindhPpraPayload(
+  record: SindhPpraTenderRecord,
+  lookup: SindhPpraDocumentLookup,
+  profile: SourceProfile
+): RawTenderPayload {
+  const tenderNumber = cleanOptional(record.tenderNumbers) ?? cleanOptional(record.tenderNumber);
+  const title = cleanOptional(record.name);
+  const department = cleanOptional(record.departmentName);
+  const advertisementDate = sindhPpraCalendarDate(record.publishDate);
+  const closingDate = parseSindhPpraDateTime(record.lastSubmissionDate);
+  if (!tenderNumber || !title || !department || !advertisementDate || !closingDate) {
+    throw new SourceFetchError("Sindh SPPRA returned a current tender without its required identity, title, department, publication date, or closing date.");
+  }
+  const openingDate = parseSindhPpraDateTime(record.bidOpeningDate);
+  const estimatedValue = parseMoney(record.estimatedCost === null || record.estimatedCost === undefined ? undefined : String(record.estimatedCost));
+  const procurementMethod = cleanOptional(record.procurementProcedure ?? undefined) ?? cleanOptional(record.procurementMethod ?? undefined);
+  const sourceUrl = new URL(sindhPpraPortalUrl);
+  sourceUrl.searchParams.set("tenderNo", tenderNumber);
+  const primaryDocuments = lookup.primary
+    .map((document) => sindhPpraDocument(document, tenderNumber, "bidding"))
+    .filter((document): document is NonNullable<typeof document> => Boolean(document));
+  const publicationDocuments = lookup.publications
+    .map((document) => sindhPpraDocument(document, tenderNumber, document.isCorrigendum ? "corrigendum" : "publication"))
+    .filter((document): document is NonNullable<typeof document> => Boolean(document));
+  const unusableDocumentDetails = lookup.primary.length + lookup.publications.length - primaryDocuments.length - publicationDocuments.length;
+  const documentLookupErrors = [
+    ...lookup.errors,
+    ...(unusableDocumentDetails > 0 ? [`Source returned ${unusableDocumentDetails} document record(s) without a usable file ID or GUID.`] : [])
+  ];
+  const documents = dedupeDocuments([...primaryDocuments, ...publicationDocuments]);
+  const description = normalizeWhitespace([
+    record.description || title,
+    `Tender number: ${tenderNumber}`,
+    `Department: ${department}`,
+    record.location ? `Location: ${record.location}` : "",
+    record.statusName ? `Source status: ${record.statusName}` : "",
+    openingDate ? `Bid opening: ${openingDate}` : "",
+    record.bidValidityDate ? `Bid validity: ${record.bidValidityDate}` : "",
+    record.voilation ? `Source warning: ${record.voilation}` : ""
+  ].filter(Boolean).join(". "));
+  const payload = buildPayload(profile, {
+    sourceUrl: sourceUrl.toString(),
+    title,
+    tenderNumber,
+    department,
+    advertisementDate,
+    closingDate,
+    city: cleanOptional(record.location),
+    estimatedValue,
+    description,
+    documents,
+    procurementMethod,
+    sourceStatus: cleanOptional(record.statusName),
+    websiteUrl: sindhPpraPortalUrl,
+    rawHtml: `<script type="application/json" data-sindh-published-document-id="${record.publishedDocumentID ?? ""}">${escapeHtml(JSON.stringify(record))}</script>`
+  });
+  if (openingDate) payload.openingDate = openingDate;
+  if (record.procurementCategory) payload.procurementCategory = normalizeWhitespace(record.procurementCategory);
+  const snapshot = {
+    record,
+    biddingDocuments: lookup.primary,
+    paPublishedDocuments: lookup.publications,
+    documentLookupErrors
+  };
+  payload.raw = safeJson({
+    ...snapshot,
+    sourceType: profile.sourceType,
+    adapterKey: profile.key,
+    fetchedAt: new Date().toISOString()
+  });
+  payload.rawSnapshot = {
+    content: JSON.stringify(snapshot),
+    contentType: "application/json; charset=utf-8",
+    extension: "json"
+  };
+  payload.sourceMetadata = safeJson({
+    ...(payload.sourceMetadata as Record<string, Json>),
+    publishedDocumentId: record.publishedDocumentID,
+    documentTemplateId: record.tR_DocumentTemplateID,
+    procurementPlansDetailId: record.procurementPlansDetailID,
+    officeId: record.officeID,
+    sourceTenderNumber: record.tenderNumber,
+    sourceStatus: record.statusName,
+    bidValidityDate: sindhPpraCalendarDate(record.bidValidityDate),
+    clarificationDate: parseSindhPpraDateTime(record.clarificationDate),
+    isInternational: record.isInternationalPublish,
+    violation: record.voilation,
+    bidSubmissionType: record.bidSubmissionType,
+    primaryDocumentLookup: lookup.primarySucceeded ? "fetched" : "failed",
+    publicationLookup: lookup.publicationsSucceeded ? "fetched" : "failed",
+    documentLookupErrors,
+    biddingDocumentCount: primaryDocuments.length,
+    paPublicationCount: publicationDocuments.length,
+    reportedBiddingDocumentCount: lookup.primary.length,
+    reportedPaPublicationCount: lookup.publications.length
+  });
+  return payload;
+}
+
+function sindhPpraDocument(
+  record: SindhPpraDocumentRecord,
+  tenderNumber: string,
+  kind: "bidding" | "publication" | "corrigendum"
+): RawTenderPayload["documents"][number] | undefined {
+  const fileId = Number(record.dmS_FileID);
+  const guid = cleanOptional(record.dmS_FileGUID);
+  if (!Number.isInteger(fileId) || fileId <= 0 || !guid) return undefined;
+  const url = new URL(sindhPpraDownloadUrl);
+  url.searchParams.set("fileId", String(fileId));
+  url.searchParams.set("guid", guid);
+  const templateName = cleanOptional(record.documentTemplateName) ?? kind;
+  return {
+    url: url.toString(),
+    filename: `${sindhPpraFilenamePart(tenderNumber)}-${sindhPpraFilenamePart(templateName)}.pdf`,
+    mimeType: "application/pdf",
+    sourceDocumentKey: `sindh_sppra_${kind}_${fileId}`,
+    downloadRequest: {
+      method: "POST",
+      headers: sindhPpraPublicHeaders(),
+      body: safeJson({
+        loggedInUserOfficeID: sindhPpraOfficeId,
+        loggedInUserID: 1,
+        ID: fileId,
+        idsList: guid
+      }),
+      responseFormat: "json_base64"
+    }
+  };
+}
+
+function sindhPpraDocumentIsUsable(record: SindhPpraDocumentRecord): boolean {
+  const fileId = Number(record.dmS_FileID);
+  return Number.isInteger(fileId) && fileId > 0 && Boolean(cleanOptional(record.dmS_FileGUID));
+}
+
+function sindhPpraFilenamePart(value: string): string {
+  return normalizeWhitespace(value).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "document";
+}
+
+function sindhPpraRecordKey(record: SindhPpraTenderRecord): string | undefined {
+  const publishedDocumentId = Number(record.publishedDocumentID);
+  if (Number.isInteger(publishedDocumentId) && publishedDocumentId > 0) return `published:${publishedDocumentId}`;
+  const tenderNumber = cleanOptional(record.tenderNumbers) ?? cleanOptional(record.tenderNumber);
+  return tenderNumber ? `tender:${tenderNumber.toLowerCase()}` : undefined;
+}
+
+function sindhPpraTenderIsCurrent(record: SindhPpraTenderRecord, now: Date): boolean {
+  if (normalizeWhitespace(record.statusName ?? "").toLowerCase() !== "in-progress") return false;
+  if (!sindhPpraRecordKey(record) || !cleanOptional(record.name) || !cleanOptional(record.departmentName) || !sindhPpraCalendarDate(record.publishDate)) return false;
+  const closingDate = parseSindhPpraDateTime(record.lastSubmissionDate);
+  return Boolean(closingDate && Date.parse(closingDate) >= now.getTime());
+}
+
+function sindhPpraCalendarDate(value: string | undefined): string | undefined {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match || match[1] === "0001") return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined;
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+export function parseSindhPpraDateTime(value: string | undefined): string | undefined {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?/);
+  if (!match || match[1] === "0001") return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? 0);
+  const millisecond = Number((match[7] ?? "0").padEnd(3, "0"));
+  if (hour > 23 || minute > 59 || second > 59) return undefined;
+  const local = new Date(Date.UTC(year, month, day, hour, minute, second, millisecond));
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() !== month || local.getUTCDate() !== day) return undefined;
+  return new Date(local.getTime() - 5 * 60 * 60 * 1000).toISOString();
+}
+
+function sindhPpraPublicHeaders(): Record<string, string> {
+  return {
+    authorization: "Basic YWRtaW46cHByYTEy",
+    "content-type": "application/json",
+    officedetail: "Sindh-PPRA-Dev",
+    origin: sindhPpraPortalUrl.slice(0, -1),
+    referer: sindhPpraPortalUrl
+  };
+}
+
+async function fetchSindhPpraJson<T>(url: string, body: Record<string, unknown>, userAgent: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...sindhPpraPublicHeaders(),
+          "user-agent": userAgent,
+          accept: "application/json"
+        },
+        body: JSON.stringify(body),
+        redirect: "follow",
+        signal: AbortSignal.timeout(30_000),
+        dispatcher: insecureAgent
+      } as any);
+      const text = await response.text();
+      if (!response.ok) throw new SourceFetchError(`Sindh SPPRA returned HTTP ${response.status}.`);
+      const parsed = JSON.parse(text) as SindhPpraApiResponse<unknown>;
+      if (parsed.success !== true) throw new SourceFetchError(parsed.responseMessage || "Sindh SPPRA rejected the public API request.");
+      return parsed as T;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      await sleep(1_500);
+    }
+  }
+  throw new SourceFetchError(lastError instanceof Error ? lastError.message : "Sindh SPPRA request failed.");
 }
 
 abstract class OcrNewspaperAdapter implements SourceAdapter {
@@ -292,170 +2280,12 @@ class ExpressEpaperAdapter extends OcrNewspaperAdapter {
 }
 
 export const sourceAdapters: SourceAdapter[] = [
-  new ProfiledPublicSourceAdapter({
-    key: "federal-epads",
-    name: "Federal EPADS",
-    sourceType: "federal",
-    region: "Pakistan",
-    sourceGroup: "ppra_epads",
-    documentPrefix: "tender_ppra2",
-    portalFamily: "ppra_epads",
-    knownSourceDomains: [
-      "epads.gov.pk",
-      "vendors.epads.gov.pk",
-      "eprocure.gov.pk",
-      "procure.gov.pk",
-      "ppra.org.pk"
-    ],
-    listing: {
-      rowSelector: "table tbody tr, .table tbody tr, .card, .opportunity-card, .procurement-card",
-      linkSelector: "a[href*='opportunities'], a[href*='procurements'], a[href*='tender'], a",
-      titleSelector: "td:nth-child(3) a span",
-      tenderNumberSelector: "td:nth-child(2) span, td:nth-child(2)",
-      departmentSelector: "td:nth-child(3) > span",
-      advertisementDateSelector: "td:nth-child(5) .bg-label-success",
-      closingDateSelector: "td:nth-child(5) .bg-label-danger",
-      estimatedValueSelector: "td:nth-child(7), .estimated-cost, .value",
-      documentSelector: "a[href$='.pdf'], a[href*='download']"
-    },
-    detail: {
-      titleSelector: "h1, h2, h3, h4, .title, .procurement-title, .bg-facebook, .badge-primary",
-      departmentSelector: ".procuring-agency, .agency, .department, .organization",
-      closingDateSelector: ".closing-date, .deadline, td:contains('Closing') + td",
-      documentSelector: "a[href$='.pdf'], a:contains('Download PDF'), a[href*='download']"
-    },
-    defaultProcurementMethod: "As published on EPADS",
-    defaultSubmissionMethod: "Electronic via EPADS"
-  }),
-  new ProfiledPublicSourceAdapter({
-    key: "federal-ppra-active",
-    name: "Federal PPRA Active Tenders",
-    sourceType: "federal",
-    region: "Pakistan",
-    sourceGroup: "ppra_epads",
-    documentPrefix: "tender_ppra2",
-    portalFamily: "ppra_epads",
-    knownSourceDomains: [
-      "ppra.org.pk",
-      "epms.ppra.gov.pk",
-      "epads.gov.pk",
-      "vendors.epads.gov.pk",
-      "eprocure.gov.pk",
-      "procure.gov.pk"
-    ],
-    listing: {
-      rowSelector: "table tbody tr, table tr",
-      linkSelector: "a[href*='tdoc'], a[href*='doc'], a[href*='tender'], a",
-      titleSelector: "td:nth-child(3), td:nth-child(4), a",
-      tenderNumberSelector: "td:nth-child(1), td:nth-child(2)",
-      departmentSelector: "td:nth-child(2), td:nth-child(3)",
-      advertisementDateSelector: "td:nth-child(5)",
-      closingDateSelector: "td:nth-child(6), td:nth-child(7)",
-      documentSelector: "a[href$='.pdf'], a[href*='tdoc'], a[href*='doc']"
-    },
-    defaultProcurementMethod: "Open competitive bidding",
-    defaultSubmissionMethod: "As stated in PPRA notice"
-  }),
-  new ProfiledPublicSourceAdapter({
-    key: "punjab-ppra",
-    name: "Punjab PPRA",
-    sourceType: "provincial",
-    region: "Punjab",
-    listing: {
-      rowSelector: ".rgMasterTable tbody tr.rgRow, .rgMasterTable tbody tr.rgAltRow",
-      linkSelector: "td:nth-child(8) a, td:nth-child(9) a, a",
-      titleSelector: "td:nth-child(2)",
-      tenderNumberSelector: "td:nth-child(8) a, td:nth-child(9) a",
-      departmentSelector: "td:nth-child(6)",
-      advertisementDateSelector: "td:nth-child(4)",
-      closingDateSelector: "td:nth-child(5)",
-      documentSelector: "td:nth-child(8) a, td:nth-child(9) a"
-    },
-    defaultProcurementMethod: "Punjab PPRA public procurement process",
-    defaultSubmissionMethod: "As stated in Punjab PPRA notice"
-  }),
-  new ProfiledPublicSourceAdapter({
-    key: "sindh-sppra",
-    name: "Sindh SPPRA",
-    sourceType: "provincial",
-    region: "Sindh",
-    sourceGroup: "sindh_sppra",
-    documentPrefix: "tender_SINDH",
-    portalFamily: "sindh_sppra",
-    knownSourceDomains: [
-      "pprasindh.gov.pk",
-      "e.pprasindh.gov.pk",
-      "epads.pprasindh.gov.pk",
-      "portalsindh.eprocure.gov.pk",
-      "sindh.eprocure.gov.pk"
-    ],
-    listing: {
-      rowSelector: "#tender_list tbody tr",
-      linkSelector: "td:nth-child(8) a",
-      titleSelector: "td:nth-child(7)",
-      tenderNumberSelector: "td:nth-child(2)",
-      departmentSelector: "td:nth-child(3)",
-      advertisementDateSelector: "td:nth-child(4)",
-      closingDateSelector: "td:nth-child(5)",
-      citySelector: "td:nth-child(7)",
-      documentSelector: "td:nth-child(8) a"
-    },
-    detail: {
-      documentSelector: "a[href$='.pdf'], a[href*='download']"
-    },
-    defaultProcurementMethod: "Sindh SPPRA public procurement process",
-    defaultSubmissionMethod: "As stated in SPPRA notice"
-  }),
-  new ProfiledPublicSourceAdapter({
-    key: "kp-ppra-active",
-    name: "Khyber Pakhtunkhwa PPRA",
-    sourceType: "provincial",
-    region: "Khyber Pakhtunkhwa",
-    sourceGroup: "kp_kppra",
-    documentPrefix: "tender_kppra",
-    portalFamily: "kp_kppra",
-    knownSourceDomains: [
-      "kppra.gov.pk",
-      "portal.kppra.gov.pk",
-      "kp.eprocure.gov.pk",
-      "portalkp.eprocure.gov.pk",
-      "phedkp.gov.pk",
-      "lgkp.gov.pk",
-      "irrigation.gkp.pk"
-    ],
-    listing: {
-      rowSelector: "table tbody tr, table tr",
-      linkSelector: "a[href*='tender'], a[href$='.pdf'], a",
-      titleSelector: "td:nth-child(2), td:nth-child(3), a",
-      tenderNumberSelector: "td:nth-child(1)",
-      departmentSelector: "td:nth-child(3), td:nth-child(4)",
-      advertisementDateSelector: "td:nth-child(5)",
-      closingDateSelector: "td:nth-child(6)",
-      citySelector: "td:nth-child(4), td:nth-child(7)",
-      documentSelector: "a[href$='.pdf'], a[href*='download']"
-    },
-    defaultProcurementMethod: "KP PPRA public procurement process",
-    defaultSubmissionMethod: "As stated in KP PPRA notice"
-  }),
-  new ProfiledPublicSourceAdapter({
-    key: "balochistan-bppra",
-    name: "Balochistan PPRA",
-    sourceType: "provincial",
-    region: "Balochistan",
-    listing: {
-      rowSelector: "table tbody tr, table tr, .tender, .card",
-      linkSelector: "a[href*='tender'], a[href$='.pdf'], a",
-      titleSelector: "td:nth-child(2), td:nth-child(3), h3, h4, a",
-      tenderNumberSelector: "td:nth-child(1)",
-      departmentSelector: "td:nth-child(3), td:nth-child(4), .department",
-      advertisementDateSelector: "td:nth-child(4), td:nth-child(5)",
-      closingDateSelector: "td:nth-child(5), td:nth-child(6), .deadline",
-      citySelector: "td:nth-child(4), .city",
-      documentSelector: "a[href$='.pdf'], a[href*='download']"
-    },
-    defaultProcurementMethod: "Balochistan PPRA public procurement process",
-    defaultSubmissionMethod: "As stated in Balochistan PPRA notice"
-  }),
+  new FederalEpadsAdapter(),
+  new FederalPpraAdapter(),
+  new PunjabPpraAdapter(),
+  new SindhPpraAdapter(),
+  new KpPpraAdapter(),
+  new BalochistanBppraAdapter(),
   newspaperAdapter("business-recorder-tenders", "Business Recorder Tenders", "https://www.brecorder.com/business-finance/tenders"),
   newspaperAdapter("dawn-public-tenders", "Dawn Public Tender Notices", "https://www.dawn.com/classifieds/tenders"),
   new JangEpaperAdapter(),
@@ -598,17 +2428,48 @@ async function fetchPublicText(url: string, userAgent = defaultUserAgent): Promi
   return { text: response.text, contentType: response.contentType };
 }
 
-export async function fetchBinary(url: string, userAgent = defaultUserAgent): Promise<{ ok: boolean; status: number; buffer: Buffer; contentType: string }> {
+export async function fetchBinary(
+  url: string,
+  userAgent = defaultUserAgent,
+  downloadRequest?: RawTenderPayload["documents"][number]["downloadRequest"]
+): Promise<{ ok: boolean; status: number; buffer: Buffer; contentType: string; filename?: string | undefined }> {
   try {
     const response = await fetch(url, {
+      method: downloadRequest?.method ?? "GET",
       headers: {
         "user-agent": userAgent,
-        accept: "application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*,text/html,*/*"
+        accept: "application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*,text/html,*/*",
+        ...downloadRequest?.headers
       },
+      body: downloadRequest ? JSON.stringify(downloadRequest.body) : undefined,
       redirect: "follow",
       signal: AbortSignal.timeout(sourceRuntimeConfig.documentFetchTimeoutMs),
       dispatcher: insecureAgent
     } as any);
+    if (downloadRequest?.responseFormat === "json_base64") {
+      const responseText = await response.text();
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          buffer: Buffer.from(responseText),
+          contentType: response.headers.get("content-type") ?? "application/json"
+        };
+      }
+      const envelope = JSON.parse(responseText) as {
+        success?: boolean;
+        data?: { bytes?: string; contentType?: string; fileName?: string };
+      };
+      const bytes = envelope.data?.bytes;
+      const buffer = bytes ? Buffer.from(bytes, "base64") : Buffer.alloc(0);
+      return {
+        ok: envelope.success === true && buffer.length > 0,
+        status: response.status,
+        buffer,
+        contentType: envelope.data?.contentType ?? "application/octet-stream",
+        filename: cleanOptional(envelope.data?.fileName)
+      };
+    }
     const arrayBuffer = await response.arrayBuffer();
     return {
       ok: response.ok,
@@ -775,6 +2636,7 @@ function buildPayload(
     procurementMethod: cleanOptional(input.procurementMethod) ?? profile.defaultProcurementMethod,
     submissionMethod: cleanOptional(input.submissionMethod) ?? profile.defaultSubmissionMethod,
     contactPerson: cleanOptional(input.contactPerson),
+    sourceStatus: cleanOptional(input.sourceStatus),
     newspaperName: profile.newspaperName,
     publicationDate: profile.sourceType === "newspaper" ? input.advertisementDate : undefined,
     pageSection: profile.sourceType === "newspaper" ? "tenders/classifieds" : undefined,

@@ -436,6 +436,12 @@ export interface RawTenderDocument {
   originalSourceUrl?: string | undefined;
   websiteUrl?: string | undefined;
   sourceDocumentKey?: string | undefined;
+  downloadRequest?: {
+    method: "POST";
+    headers?: Record<string, string> | undefined;
+    body: Json;
+    responseFormat?: "binary" | "json_base64" | undefined;
+  } | undefined;
 }
 
 export interface RawSourceSnapshotPayload {
@@ -467,6 +473,7 @@ export interface RawTenderPayload {
   procurementMethod?: string;
   submissionMethod?: string;
   contactPerson?: string;
+  sourceStatus?: string;
   newspaperName?: string;
   publicationDate?: string;
   pageSection?: string;

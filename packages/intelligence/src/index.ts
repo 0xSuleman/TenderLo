@@ -140,10 +140,11 @@ const departmentAliases: Array<{ pattern: RegExp; normalized: string }> = [
 ];
 
 export function parseDateCandidates(text: string): Array<{ value: string; evidence: string; confidence: number }> {
-  const normalized = normalizeWhitespace(text);
+  const normalized = normalizeWhitespace(text).replace(/\b(\d{1,2})\s*(?:st|nd|rd|th)\b/gi, "$1");
   const results: Array<{ value: string; evidence: string; confidence: number }> = [];
-  const numericPattern = /\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?\b/gi;
-  const namedPattern = /\b(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?,?\s+(\d{4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?\b/gi;
+  const numericPattern = /\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+\([^)]*\))?(?:\s+(?:(?:at|till|until|by)\s+)?(\d{1,2}):(\d{2})\s*(A\.?M\.?|P\.?M\.?)?)?(?=\s|[,;)]|$)/gi;
+  const namedPattern = /\b(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?,?\s+(\d{4})(?:\s+\([^)]*\))?(?:\s+(?:(?:at|till|until|by)\s+)?(\d{1,2}):(\d{2})\s*(A\.?M\.?|P\.?M\.?)?)?(?=\s|[,;)]|$)/gi;
+  const monthFirstNamedPattern = /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),\s+(\d{4})(?:\s+\([^)]*\))?(?:\s+(?:(?:at|till|until|by)\s+)?(\d{1,2}):(\d{2})\s*(A\.?M\.?|P\.?M\.?)?)?(?=\s|[,;)]|$)/gi;
 
   for (const match of normalized.matchAll(numericPattern)) {
     const day = Number(match[1]);
@@ -158,6 +159,16 @@ export function parseDateCandidates(text: string): Array<{ value: string; eviden
     const monthLabel = match[2];
     if (!monthLabel) continue;
     const month = monthMap[monthLabel.toLowerCase().replace(".", "")];
+    const year = Number(match[3]);
+    const date = buildDate(year, month, day, match[4], match[5], match[6]);
+    if (date) results.push({ value: date.toISOString(), evidence: match[0], confidence: intelligenceRuntimeConfig.confidence.namedDate });
+  }
+
+  for (const match of normalized.matchAll(monthFirstNamedPattern)) {
+    const monthLabel = match[1];
+    if (!monthLabel) continue;
+    const month = monthMap[monthLabel.toLowerCase().replace(".", "")];
+    const day = Number(match[2]);
     const year = Number(match[3]);
     const date = buildDate(year, month, day, match[4], match[5], match[6]);
     if (date) results.push({ value: date.toISOString(), evidence: match[0], confidence: intelligenceRuntimeConfig.confidence.namedDate });
@@ -182,8 +193,9 @@ function buildDate(
   if (month === undefined || month < 0 || month > 11 || day < 1 || day > 31) return null;
   let hour = hourValue ? Number(hourValue) : 0;
   const minute = minuteValue ? Number(minuteValue) : 0;
-  if (meridiem?.toLowerCase() === "pm" && hour < 12) hour += 12;
-  if (meridiem?.toLowerCase() === "am" && hour === 12) hour = 0;
+  const normalizedMeridiem = meridiem?.replace(/\./g, "").toLowerCase();
+  if (normalizedMeridiem === "pm" && hour < 12) hour += 12;
+  if (normalizedMeridiem === "am" && hour === 12) hour = 0;
   const date = new Date(Date.UTC(year, month, day, hour, minute));
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -210,8 +222,8 @@ export function extractTenderFields(text: string): ExtractedFieldResult[] {
   const compactText = normalizeWhitespace(text);
   const fields: ExtractedFieldResult[] = [];
 
-  fields.push(...extractDateField(compactText, "closing_date", ["closing date", "last date", "submission deadline", "bid submission", "receiving of tenders"]));
-  fields.push(...extractDateField(compactText, "opening_date", ["opening date", "bid opening", "opening of tenders"]));
+  fields.push(...extractDateField(compactText, "closing_date", ["closing date", "last date", "submission deadline", "bid submission", "receiving of tenders", "must be submitted", "on or before", "date for submission"]));
+  fields.push(...extractDateField(compactText, "opening_date", ["opening date", "bid opening", "opening of tenders", "will be opened", "shall be opened"]));
   fields.push(...extractMoneyField(compactText, "bid_security_amount", ["bid security", "earnest money", "security deposit", "call deposit", "bid bond"]));
   fields.push(...extractMoneyField(compactText, "estimated_value", ["estimated cost", "estimated value", "nit cost", "engineer estimate", "project cost"]));
   fields.push(...extractMoneyField(compactText, "document_fee", ["tender fee", "document fee", "bidding document fee"]));
@@ -253,12 +265,134 @@ export function extractTenderFields(text: string): ExtractedFieldResult[] {
   return collapseFieldCandidates(fields);
 }
 
+export function extractPunjabPpraCorrectionFields(text: string): ExtractedFieldResult[] {
+  const compactText = normalizeWhitespace(text);
+  const fields: ExtractedFieldResult[] = [];
+  const estimatedCostCorrection = compactText.match(/estimated cost.{0,180}?(?:shall|may)\s+be\s+read\s+as.{0,140}/i)?.[0];
+  const bidSecurityCorrection = compactText.match(/bid security.{0,140}?(?:shall|may)\s+be\s+read\s+as.{0,140}/i)?.[0];
+  const deadlineCorrection = compactText.match(/(?:date for submission|submission date)[^.]{0,260}(?:extended|changed)[^.]{0,300}/i)?.[0];
+
+  appendCorrectedMoneyField(fields, "estimated_value", estimatedCostCorrection);
+  appendCorrectedMoneyField(fields, "bid_security_amount", bidSecurityCorrection);
+
+  if (deadlineCorrection) {
+    const dates = parseDateCandidates(deadlineCorrection);
+    const correctedClosing = dates.at(-1);
+    if (correctedClosing) {
+      fields.push({
+        fieldName: "closing_date",
+        fieldValue: correctedClosing.value,
+        sourceMethod: "regex",
+        confidenceScore: 0.96,
+        evidenceText: deadlineCorrection,
+        verificationStatus: "unverified"
+      });
+      const openingTime = deadlineCorrection.match(/(?:shall|will)\s+be\s+opened[^.]{0,80}?at\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      if (openingTime) {
+        const opening = new Date(correctedClosing.value);
+        let hour = Number(openingTime[1]);
+        const minute = Number(openingTime[2]);
+        const meridiem = openingTime[3]?.toLowerCase();
+        if (meridiem === "pm" && hour < 12) hour += 12;
+        if (meridiem === "am" && hour === 12) hour = 0;
+        opening.setUTCHours(hour, minute, 0, 0);
+        fields.push({
+          fieldName: "opening_date",
+          fieldValue: opening.toISOString(),
+          sourceMethod: "regex",
+          confidenceScore: 0.96,
+          evidenceText: deadlineCorrection,
+          verificationStatus: "unverified"
+        });
+      }
+    }
+  }
+
+  return fields;
+}
+
+export function extractKpPpraNoticeFields(text: string): ExtractedFieldResult[] {
+  const compactText = normalizeWhitespace(text).replace(/\b(\d{1,2})\s*(?:st|nd|rd|th)\b/gi, "$1");
+  const fields: ExtractedFieldResult[] = [];
+  const closingEvidence = compactText.match(
+    /(?:closing date|deadline for submission|(?:must\s+)?(?:upload|submit)(?:ted)?\s+(?:their\s+)?bids?\s+on or before|bids?\s+must\s+be\s+(?:submitted|uploaded))[^.]{0,240}/i
+  )?.[0];
+  const closingCandidate = closingEvidence
+    ? parseDateCandidates(closingEvidence).sort((left, right) => hasTimeEvidence(right.evidence) - hasTimeEvidence(left.evidence))[0]
+    : undefined;
+  if (closingCandidate) {
+    fields.push({
+      fieldName: "closing_date",
+      fieldValue: closingCandidate.value,
+      sourceMethod: "regex",
+      confidenceScore: 0.96,
+      evidenceText: closingEvidence ?? closingCandidate.evidence,
+      verificationStatus: "unverified"
+    });
+  }
+
+  const openingEvidence = compactText.match(/(?:bids?|technical bids?)[^.]{0,60}?(?:will|shall)\s+be\s+opened[^.]{0,180}/i)?.[0];
+  if (!openingEvidence) return fields;
+  const explicitOpening = parseDateCandidates(openingEvidence).sort(
+    (left, right) => hasTimeEvidence(right.evidence) - hasTimeEvidence(left.evidence)
+  )[0];
+  let openingDate = explicitOpening?.value;
+  if (!openingDate && closingCandidate && /same\s+(?:date|day)/i.test(openingEvidence)) {
+    const time = openingEvidence.match(/(?:at|time\s*[:\-]?)\s*(\d{1,2}):(\d{2})\s*(A\.?M\.?|P\.?M\.?)?/i);
+    if (time) {
+      const opening = new Date(closingCandidate.value);
+      let hour = Number(time[1]);
+      const minute = Number(time[2]);
+      const meridiem = time[3]?.replace(/\./g, "").toLowerCase();
+      if (meridiem === "pm" && hour < 12) hour += 12;
+      if (meridiem === "am" && hour === 12) hour = 0;
+      opening.setUTCHours(hour, minute, 0, 0);
+      openingDate = opening.toISOString();
+    }
+  }
+  if (openingDate) {
+    fields.push({
+      fieldName: "opening_date",
+      fieldValue: openingDate,
+      sourceMethod: "regex",
+      confidenceScore: 0.96,
+      evidenceText: openingEvidence,
+      verificationStatus: "unverified"
+    });
+  }
+  return fields;
+}
+
+function hasTimeEvidence(value: string): number {
+  return /\b\d{1,2}:\d{2}\b/.test(value) ? 1 : 0;
+}
+
+function appendCorrectedMoneyField(fields: ExtractedFieldResult[], fieldName: string, evidenceText: string | undefined): void {
+  if (!evidenceText) return;
+  const marker = evidenceText.search(/(?:shall|may)\s+be\s+read\s+as/i);
+  const corrected = parseMoneyCandidates(marker >= 0 ? evidenceText.slice(marker) : evidenceText)[0];
+  if (!corrected) return;
+  fields.push({
+    fieldName,
+    fieldValue: String(corrected.value),
+    sourceMethod: "regex",
+    confidenceScore: 0.96,
+    evidenceText,
+    verificationStatus: "unverified"
+  });
+}
+
 function extractDateField(text: string, fieldName: string, keywords: string[]): ExtractedFieldResult[] {
   const fields: ExtractedFieldResult[] = [];
   for (const keyword of keywords) {
     for (const index of findAllIndexes(text.toLowerCase(), keyword)) {
       const evidenceText = windowAround(text, index, 220);
-      const dates = parseDateCandidates(evidenceText);
+      const keywordIndex = evidenceText.toLowerCase().indexOf(keyword);
+      const dates = parseDateCandidates(evidenceText).sort((left, right) => {
+        const leftIndex = evidenceText.toLowerCase().indexOf(left.evidence.toLowerCase());
+        const rightIndex = evidenceText.toLowerCase().indexOf(right.evidence.toLowerCase());
+        return Math.abs(leftIndex - keywordIndex) - Math.abs(rightIndex - keywordIndex);
+      });
       for (const date of dates.slice(0, 2)) {
         fields.push({
           fieldName,
@@ -279,7 +413,12 @@ function extractMoneyField(text: string, fieldName: string, keywords: string[]):
   for (const keyword of keywords) {
     for (const index of findAllIndexes(text.toLowerCase(), keyword)) {
       const evidenceText = windowAround(text, index, 240);
-      const money = parseMoneyCandidates(evidenceText);
+      const keywordIndex = evidenceText.toLowerCase().indexOf(keyword);
+      const money = parseMoneyCandidates(evidenceText).sort((left, right) => {
+        const leftIndex = evidenceText.toLowerCase().indexOf(left.evidence.toLowerCase());
+        const rightIndex = evidenceText.toLowerCase().indexOf(right.evidence.toLowerCase());
+        return Math.abs(leftIndex - keywordIndex) - Math.abs(rightIndex - keywordIndex);
+      });
       for (const amount of money.slice(0, 2)) {
         fields.push({
           fieldName,
@@ -297,11 +436,21 @@ function extractMoneyField(text: string, fieldName: string, keywords: string[]):
 
 export function detectGeography(text: string): { province: string | null; city: string | null; evidence: string } {
   const normalized = normalizeForSearch(text);
-  const province = pakistanProvinces.find((item) => normalized.includes(normalizeForSearch(item))) ?? null;
-  const city = majorPakistanCities.find((item) => normalized.includes(normalizeForSearch(item))) ?? null;
+  const province = earliestNamedLocation(normalized, pakistanProvinces);
+  const city = earliestNamedLocation(normalized, majorPakistanCities);
   const target = city ?? province;
   const evidence = target ? windowAround(text, normalized.indexOf(normalizeForSearch(target)), 120) : "";
   return { province, city, evidence };
+}
+
+function earliestNamedLocation(normalizedText: string, locations: readonly string[]): string | null {
+  let earliest: { location: string; index: number } | null = null;
+  for (const location of locations) {
+    const index = normalizedText.indexOf(normalizeForSearch(location));
+    if (index < 0 || (earliest && index >= earliest.index)) continue;
+    earliest = { location, index };
+  }
+  return earliest?.location ?? null;
 }
 
 export function normalizeDepartment(value: string | null | undefined): string | null {

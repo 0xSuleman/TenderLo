@@ -159,9 +159,13 @@ async function main() {
       const preview = stmt.slice(0, 80).replace(/\n/g, " ");
       process.stdout.write(`  [${idx + 1}/${statements.length}] ${preview}... `);
 
-      const { error } = await supabase.rpc("exec_sql", { sql: stmt }).catch(() => ({
-        error: new Error("rpc not available"),
-      }));
+      let error = null;
+      try {
+        const response = await supabase.rpc("exec_sql", { sql: stmt });
+        error = response.error;
+      } catch (e) {
+        error = new Error("rpc not available");
+      }
 
       if (error) {
         // Fall back to direct postgres REST

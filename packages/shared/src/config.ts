@@ -4,6 +4,7 @@ export const sourceRuntimeConfig = {
   publicPortalFrequencyMinutes: 15,
   newspaperFrequencyMinutes: 1440,
   maxDocumentsPerTender: 10,
+  maxDocumentDownloadsPerSourceRun: 25,
   pageFetchTimeoutMs: 15_000,
   documentFetchTimeoutMs: 30_000
 } as const;
