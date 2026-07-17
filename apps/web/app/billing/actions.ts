@@ -8,11 +8,14 @@ export async function startCheckoutAction(formData: FormData): Promise<void> {
   const context = await getPageContext();
   if (!context) throw new Error("Authentication required.");
   const plan = String(formData.get("plan") ?? "growth") as "starter" | "growth" | "pro";
+  // CRIT-05: never use a .local placeholder — PayFast may reject it, blocking checkout
+  const { data: { user } } = await (await import("@/lib/supabase")).createSupabaseRouteClient().then(s => s.auth.getUser());
+  if (!user?.email) throw new Error("A verified email address is required to start checkout.");
   const provider = createPayFastProvider();
   const checkout = await provider.createCheckout({
     organizationId: context.organizationId,
     plan,
-    userEmail: "billing@tenderlo.local"
+    userEmail: user.email
   });
   await context.admin.from("payments").insert({
     organization_id: context.organizationId,

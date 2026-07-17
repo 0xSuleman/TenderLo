@@ -35,15 +35,26 @@ export async function ingestAllDueSources(): Promise<void> {
     .order("last_run_at", { ascending: true, nullsFirst: true });
   if (error) throw error;
 
+  const SOURCE_TIMEOUT_MS = 300_000; // 5 min — large sources (PPRA) have 200+ tenders with multiple DB writes each
   for (const source of (sources ?? []) as any[]) {
     const due = !source.last_run_at || Date.now() - new Date(source.last_run_at).getTime() >= source.scrape_frequency_minutes * 60_000;
     if (!due) continue;
     try {
-      await ingestSource(source.id);
+      await Promise.race([
+        ingestSource(source.id),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Source ingest timed out after ${SOURCE_TIMEOUT_MS / 1000}s`)), SOURCE_TIMEOUT_MS)
+        )
+      ]);
     } catch (error) {
+      const msg = error instanceof Error ? error.message
+        : (typeof error === "object" && error !== null && "message" in error) ? String((error as any).message)
+        : typeof error === "string" ? error
+        : JSON.stringify(error);
       logger.error("Tender source failed and was skipped for this batch.", {
         sourceId: source.id,
-        error: error instanceof Error ? error.message : String(error)
+        sourceName: source.name,
+        error: msg
       });
     }
   }
@@ -70,7 +81,9 @@ export async function ingestSource(sourceId: string): Promise<void> {
   try {
     await supabase.from("tender_sources").update({ last_run_at: new Date().toISOString() }).eq("id", source.id);
     const adapter = getSourceAdapter(source.adapter_key);
-    const payloads = await adapter.fetchTenders(createSourceContext(source as any));
+    const context = createSourceContext(source as any);
+    context.parseDocument = parseDocument;
+    const payloads = await adapter.fetchTenders(context);
 
     for (const payload of payloads) {
       await storeRawSnapshot(supabase, source as any, run as any, payload);
@@ -320,7 +333,19 @@ async function downloadAndParseDocuments(
   const sourceGroup = metadataString(payload.sourceGroup) ?? metadataString(sourceMetadataValue(source.metadata, "sourceGroup"));
   const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? "tender_document";
   for (const document of payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)) {
-    const fetched = await fetchBinary(document.url);
+    let fetched: Awaited<ReturnType<typeof fetchBinary>>;
+    try {
+      fetched = await fetchBinary(document.url);
+    } catch (fetchErr) {
+      await createQaTask(supabase, {
+        tenderId,
+        taskType: "parser_failure",
+        priority: "medium",
+        title: "Tender document fetch threw an exception",
+        details: safeJson({ url: document.url, error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) })
+      });
+      continue;
+    }
     if (!fetched.ok) {
       await createQaTask(supabase, {
         tenderId,
@@ -356,10 +381,6 @@ async function downloadAndParseDocuments(
           original_filename: filename,
           mime_type: fetched.contentType || document.mimeType || "application/octet-stream",
           content_hash: hash,
-          source_group: sourceGroup ?? null,
-          document_prefix: documentPrefix,
-          source_document_key: document.sourceDocumentKey ?? null,
-          fetched_at: new Date().toISOString(),
           parser_status: "pending",
           ocr_status: "not_needed"
         },
@@ -506,7 +527,8 @@ async function detectAndMergeDuplicates(supabase: DatabaseClient, tender: any): 
       { onConflict: "tender_id,candidate_tender_id" }
     );
     if (result.action === "merge") {
-      await mergeTenderRecords(supabase, candidate.id, tender.id);
+      // tender.id is the freshly-ingested primary; candidate.id is the older duplicate to remove
+      await mergeTenderRecords(supabase, tender.id, candidate.id);
     } else {
       await createQaTask(supabase, {
         tenderId: tender.id,
@@ -569,7 +591,10 @@ function extensionFromContentType(contentType: string): string {
 async function createSavedSearchNotificationsForTender(supabase: DatabaseClient, tenderId: string): Promise<void> {
   const { data: tender } = await supabase.from("tenders").select("*").eq("id", tenderId).maybeSingle();
   if (!tender || tender.status !== "published") return;
-  const { data: searches } = await supabase.from("saved_searches").select("*, notification_rules(*)");
+  // Narrow the query so we never scan every saved search across all orgs (CRIT-04)
+  let query = supabase.from("saved_searches").select("*, notification_rules(*)");
+  if (tender.province) query = query.or(`filters->>province.is.null,filters->>province.eq.${tender.province}`);
+  const { data: searches } = await query;
   for (const search of (searches ?? []) as any[]) {
     if (!matchesSavedSearch(tender, search)) continue;
     const rules = (search.notification_rules ?? []).filter((rule: any) => rule.enabled);
@@ -745,8 +770,15 @@ function safePathSegment(value: string): string {
 
 function matchesSavedSearch(tender: any, search: any): boolean {
   const query = normalizeForSearch(search.query ?? "");
-  const haystack = normalizeForSearch(`${tender.title} ${tender.description ?? ""} ${tender.department ?? ""} ${tender.city ?? ""} ${tender.province ?? ""} ${tender.sector ?? ""}`);
-  if (query && !haystack.includes(query)) return false;
+  if (query) {
+    // Use word-token intersection so "road" does not match "railroad" (HIGH-06)
+    const queryTokens = new Set(query.split(/\s+/).filter(Boolean));
+    const haystackText = normalizeForSearch(`${tender.title} ${tender.description ?? ""} ${tender.department ?? ""} ${tender.city ?? ""} ${tender.province ?? ""} ${tender.sector ?? ""}`);
+    const haystackTokens = new Set(haystackText.split(/\s+/).filter(Boolean));
+    for (const token of queryTokens) {
+      if (!haystackTokens.has(token)) return false;
+    }
+  }
   const filters = search.filters ?? {};
   if (filters.province && tender.province !== filters.province) return false;
   if (filters.city && tender.city !== filters.city) return false;

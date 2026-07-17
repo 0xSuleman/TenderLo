@@ -9,7 +9,7 @@ describe("public source adapters", () => {
 
   it("parses source-profiled public tender rows and detail documents", async () => {
     const listingHtml = `
-      <table>
+      <table id="tender_list">
         <tbody>
           <tr>
             <td>1</td>
@@ -18,8 +18,8 @@ describe("public source adapters", () => {
             <td>18/06/2026</td>
             <td>30/06/2026 11:00 AM</td>
             <td>18/06/2026</td>
-            <td>Karachi</td>
-            <td><a href="/tender/100">Construction of drainage works in Karachi</a></td>
+            <td>Construction of drainage works in Karachi</td>
+            <td><a href="/tender/100"><i class="fa fa-file"></i></a></td>
           </tr>
         </tbody>
       </table>`;

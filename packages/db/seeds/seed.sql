@@ -185,7 +185,7 @@ values
     'documentPrefix', 'tender_ppra2',
     'knownSourceDomains', array['ppra.org.pk','epms.ppra.gov.pk','epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
   )),
-  ('Punjab PPRA Public Procurement', 'https://ppra.punjab.gov.pk/public_procurement', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', '{}'::jsonb),
+  ('Punjab PPRA Public Procurement', 'https://eproc.punjab.gov.pk/ActiveTenders.aspx', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', '{}'::jsonb),
   ('Sindh SPPRA Tender List', 'https://e.pprasindh.gov.pk/tenderlst', 'provincial', 'Sindh', 'sindh-sppra', 15, 'active', jsonb_build_object(
     'sourceGroup', 'sindh_sppra',
     'portalFamily', 'sindh_sppra',
