@@ -10,7 +10,7 @@ export default async function AuditLogsPage(): Promise<JSX.Element> {
   const { data: logs } = context?.isOps ? await context.admin.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(100) : { data: [] };
   return (
     <AppShell>
-      <PageHeader title="Audit Logs" body="Tender, profile, billing, source, QA, role, and admin changes." />
+      <PageHeader title="Audit Logs" body="Tender, profile, billing, source, role, and admin changes." />
       <div className="grid gap-4">{(logs ?? []).map((log: any) => <Card key={log.id}><h2 className="font-semibold">{log.action}</h2><p className="text-sm text-muted-foreground">{log.entity_type} · {formatDate(log.created_at)}</p></Card>)}</div>
     </AppShell>
   );

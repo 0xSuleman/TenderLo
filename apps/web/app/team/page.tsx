@@ -11,7 +11,7 @@ export default async function TeamPage(): Promise<JSX.Element> {
   const { data: members } = context ? await context.admin.from("memberships").select("*, profiles(full_name)").eq("organization_id", context.organizationId) : { data: [] };
   return (
     <AppShell>
-      <PageHeader title="Team Settings" body="Workspace roles control billing, profile edits, document access, and QA operations." />
+      <PageHeader title="Team Settings" body="Workspace roles control billing, profile edits, document access, and source operations." />
       {(members ?? []).length === 0 ? (
         <EmptyState body="Active contractor workspace members will appear here." icon={<Users className="h-7 w-7" />} title="No team members found" />
       ) : (

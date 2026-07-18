@@ -8,7 +8,7 @@ export default function HomePage(): JSX.Element {
   const features: Array<[string, string, LucideIcon]> = [
     ["Evidence-backed extraction", "Each tender fact stores method, confidence, evidence text, and verification status.", FileSearch],
     ["PEC-aware readiness", "Recommendations apply hard blockers first and keep unknowns visible.", ShieldCheck],
-    ["Newspaper coverage", "Publicly accessible tender notices are handled with local OCR and QA review.", Newspaper]
+    ["Newspaper coverage", "Publicly accessible tender notices are handled with local OCR and deterministic validation.", Newspaper]
   ];
   return (
     <>
@@ -26,7 +26,7 @@ export default function HomePage(): JSX.Element {
             <Badge tone="warn">Pakistan Tender Intelligence SaaS</Badge>
             <h1 className="mt-4 max-w-3xl font-display text-5xl font-semibold leading-tight md:text-7xl">TenderLo</h1>
             <p className="mt-4 max-w-2xl text-lg leading-8 text-white/90">
-              PEC-aware tender discovery, Profile Vault readiness, deterministic extraction, and ops QA for Pakistani contractors.
+              PEC-aware tender discovery, Profile Vault readiness, deterministic extraction, and machine validation for Pakistani contractors.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <LinkButton href="/signup">

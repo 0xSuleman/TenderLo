@@ -3,6 +3,7 @@ import { logger } from "@tenderlo/shared";
 import {
   backfillStoredTenderFields,
   closeExpiredTenders,
+  enforceMachineQualityGate,
   ingestAllDueSources,
   ingestSource,
   processQueuedIngestionJobs,
@@ -35,6 +36,10 @@ async function main(): Promise<void> {
   }
   if (command === "close-expired") {
     await closeExpiredTenders();
+    return;
+  }
+  if (command === "enforce-quality") {
+    await enforceMachineQualityGate();
     return;
   }
   if (command === "process-ingestion-queue") {
@@ -77,6 +82,7 @@ async function main(): Promise<void> {
   rebuild-recommendations [organization-id]
   send-alerts
   close-expired
+  enforce-quality
   backfill-fields [source-id] [tender-id|all] [start-offset]
   schedule`);
 }

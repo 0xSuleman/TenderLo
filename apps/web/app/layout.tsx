@@ -8,7 +8,7 @@ const outfit = Outfit({ subsets: ["latin"], variable: "--font-outfit" });
 
 export const metadata: Metadata = {
   title: "TenderLo - Pakistan Tender Intelligence SaaS",
-  description: "PEC-aware tender discovery, Profile Vault, compliance checks, recommendations, and QA-backed tender intelligence for Pakistani contractors."
+  description: "PEC-aware tender discovery, Profile Vault, compliance checks, recommendations, and machine-validated tender intelligence for Pakistani contractors."
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>): JSX.Element {

@@ -9,16 +9,16 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage(): Promise<JSX.Element> {
   const context = await getPageContext();
   if (!context) return <AppShell><Card>Sign in to open your contractor dashboard.</Card></AppShell>;
-  const [org, profile, tenders, recs, qa] = await Promise.all([
+  const [org, profile, tenders, recs, sources] = await Promise.all([
     context.admin.from("organizations").select("*").eq("id", context.organizationId).single(),
     context.admin.from("company_profiles").select("*").eq("organization_id", context.organizationId).maybeSingle(),
     context.admin.from("tenders").select("id", { count: "exact", head: true }).in("status", ["published", "corrigendum"]),
     context.admin.from("recommendations").select("id", { count: "exact", head: true }).eq("organization_id", context.organizationId).neq("status", "blocked"),
-    context.admin.from("qa_tasks").select("id", { count: "exact", head: true }).eq("status", "open")
+    context.admin.from("tender_sources").select("id", { count: "exact", head: true }).eq("status", "active")
   ]);
   return (
     <AppShell>
-      <PageHeader title={org.data?.name ?? "Dashboard"} body="Contractor tender pipeline, readiness, and QA status." />
+      <PageHeader title={org.data?.name ?? "Dashboard"} body="Machine-validated contractor tenders and bid readiness." />
       <MotionList className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MotionItem><MetricCard detail="published" label="Published tenders" value={<AnimatedNumber value={tenders.count ?? 0} />} /></MotionItem>
         <MotionItem><MetricCard detail="fit" label="Recommendations" tone="good" value={<AnimatedNumber value={recs.count ?? 0} />} /></MotionItem>
@@ -30,7 +30,7 @@ export default async function DashboardPage(): Promise<JSX.Element> {
             value={<AnimatedNumber suffix="%" value={profile.data?.profile_completeness_score ?? 0} />}
           />
         </MotionItem>
-        <MotionItem><MetricCard detail="review" label="Open QA" tone={qa.count ? "warn" : "good"} value={<AnimatedNumber value={qa.count ?? 0} />} /></MotionItem>
+        <MotionItem><MetricCard detail="online" label="Active sources" tone="good" value={<AnimatedNumber value={sources.count ?? 0} />} /></MotionItem>
       </MotionList>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-[1.3fr_.7fr]">

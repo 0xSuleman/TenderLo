@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, BriefcaseBusiness, ClipboardCheck, FileSearch, Gauge, Settings, ShieldCheck, Users } from "lucide-react";
+import { Bell, BriefcaseBusiness, ClipboardCheck, FileSearch, Gauge, ShieldCheck, Users } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
@@ -11,8 +11,7 @@ const appLinks = [
   { href: "/profile", label: "Profile Vault", icon: BriefcaseBusiness },
   { href: "/saved-searches", label: "Saved Searches", icon: Bell },
   { href: "/billing", label: "Billing", icon: ClipboardCheck },
-  { href: "/team", label: "Team", icon: Users },
-  { href: "/admin/qa-tasks", label: "Ops QA", icon: Settings }
+  { href: "/team", label: "Team", icon: Users }
 ];
 
 export function MarketingNav(): JSX.Element {
