@@ -25,7 +25,7 @@ export function TenderListInteractive({ tenders, fullAccess }: TenderListProps):
     fetch(`/api/tenders/${selectedId}`)
       .then(res => res.json())
       .then(res => {
-        if (res.success && res.data) {
+        if (res.data) {
           setDetails(res.data);
         } else {
           setDetails(null);
@@ -134,16 +134,26 @@ export function TenderListInteractive({ tenders, fullAccess }: TenderListProps):
       {/* Slide-out Drawer Overlay */}
       {drawerOpen && (
         <div className="fixed inset-0 z-50 overflow-hidden">
+          <style dangerouslySetInnerHTML={{__html: `
+            @keyframes slide-in-drawer {
+              from { transform: translateX(100%); }
+              to { transform: translateX(0); }
+            }
+            .animate-slide-in {
+              animation: slide-in-drawer 550ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            }
+          `}} />
+
           {/* Backdrop */}
           <div 
             onClick={closeDrawer}
-            className="absolute inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity duration-300"
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity duration-300 animate-fade-in"
           />
 
           {/* Slider Panel */}
-          <div className="absolute inset-y-0 right-0 max-w-full pl-10 flex">
+          <div className="absolute inset-y-0 right-0 w-[70vw] max-w-[70vw] flex z-50">
             <div className={cn(
-              "w-screen max-w-2xl bg-[#FAF9F5] border-l border-slate-200/80 shadow-2xl flex flex-col transform transition-transform duration-300 ease-out translate-x-0"
+              "w-full h-full bg-[#FAF9F5] border-l border-slate-200/80 shadow-2xl flex flex-col animate-slide-in"
             )}>
               {/* Header */}
               <div className="bg-[#FAF9F5] border-b border-slate-200/60 px-6 py-5 flex items-center justify-between">
