@@ -9,7 +9,7 @@
  */
 
 import postgres from "postgres";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -30,10 +30,14 @@ if (!supabaseUrl || !serviceKey) {
 const projectRef = new URL(supabaseUrl).hostname.split(".")[0];
 const connectionString = `postgresql://postgres:${serviceKey}@db.${projectRef}.supabase.co:5432/postgres`;
 
-const files = {
-  schema: join(root, "supabase/migrations/0001_initial_schema.sql"),
-  seed: join(root, "packages/db/seeds/seed.sql"),
-};
+// Auto-discover all migration files in order
+const migrationsDir = join(root, "supabase/migrations");
+const migrationFiles = readdirSync(migrationsDir)
+  .filter((f) => f.endsWith(".sql"))
+  .sort()
+  .map((f) => ({ label: f.replace(".sql", ""), path: join(migrationsDir, f) }));
+
+const seedFile = { label: "seed", path: join(root, "packages/db/seeds/seed.sql") };
 
 async function run() {
   const sql = postgres(connectionString, {
@@ -43,28 +47,27 @@ async function run() {
     idle_timeout: 10,
   });
 
-  const targets = mode === "schema" ? ["schema"] : mode === "seed" ? ["seed"] : ["schema", "seed"];
+  const targets = mode === "seed" ? [seedFile] : mode === "schema" ? migrationFiles : [...migrationFiles, seedFile];
 
   for (const target of targets) {
-    const filePath = files[target];
-    console.log(`\n📄  Running ${target}: ${filePath}`);
+    console.log(`\n📄  Running ${target.label}: ${target.path}`);
     let content;
     try {
-      content = readFileSync(filePath, "utf-8");
+      content = readFileSync(target.path, "utf-8");
     } catch (e) {
-      console.error(`❌  Cannot read ${filePath}:`, e.message);
+      console.error(`❌  Cannot read ${target.path}:`, e.message);
       process.exit(1);
     }
 
     try {
       // Run the whole file as a single transaction
       await sql.unsafe(content);
-      console.log(`✅  ${target} applied successfully.`);
+      console.log(`✅  ${target.label} applied successfully.`);
     } catch (e) {
-      console.error(`❌  ${target} failed:`, e.message);
-      // For schema, non-fatal errors (e.g. already exists) are common — continue
-      if (target === "schema") {
-        console.log("ℹ️   Schema may already be partially applied. Continuing...");
+      console.error(`❌  ${target.label} failed:`, e.message);
+      // For schema/migrations, non-fatal errors (e.g. already exists) are common — continue
+      if (target.label !== "seed") {
+        console.log("ℹ️   Migration may already be partially applied. Continuing...");
       } else {
         await sql.end();
         process.exit(1);

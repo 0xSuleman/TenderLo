@@ -131,13 +131,21 @@ async function main() {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const files = runSeed
-    ? [
-        { label: "Seed", path: join(root, "packages/db/seeds/seed.sql") },
-      ]
-    : [
-        { label: "Migration 0001 (initial schema)", path: join(root, "supabase/migrations/0001_initial_schema.sql") },
-      ];
+  let files;
+  if (runSeed) {
+    files = [{ label: "Seed", path: join(root, "packages/db/seeds/seed.sql") }];
+  } else {
+    const { readdirSync } = await import("node:fs");
+    const migrationsDir = join(root, "supabase/migrations");
+    const migrationFiles = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    files = migrationFiles.map((f) => ({
+      label: `Migration ${f.replace(".sql", "")}`,
+      path: join(migrationsDir, f),
+    }));
+    console.log(`\n🔍 Found ${files.length} migration(s): ${migrationFiles.join(", ")}`);
+  }
 
   for (const file of files) {
     let sql;
