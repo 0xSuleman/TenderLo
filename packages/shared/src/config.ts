@@ -64,6 +64,17 @@ export const pipelineRuntimeConfig = {
   subscriptionPeriodDays: 30
 } as const;
 
+export const ingestionRuntimeConfig = {
+  queueBatchSize: 2,
+  leaseSeconds: 3_600,
+  maxAttempts: 5,
+  circuitFailureThreshold: 3,
+  retryBaseDelaySeconds: 60,
+  retryMaxDelaySeconds: 86_400,
+  circuitBaseDelayMinutes: 15,
+  circuitMaxDelayMinutes: 1_440
+} as const;
+
 export const reconScoringConfig = {
   weights: {
     pecValueEligibility: 35,

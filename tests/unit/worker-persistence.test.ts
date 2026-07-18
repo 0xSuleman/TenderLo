@@ -5,8 +5,11 @@ import {
   buildSourceProvenance,
   buildTenderDocumentStoragePath,
   buildTenderFieldPromotion,
+  circuitOpenUntilFor,
+  retryDelaySeconds,
   validateDownloadedDocument,
-  validateNewTenderAdmission
+  validateNewTenderAdmission,
+  validateSourcePayload
 } from "../../apps/worker/src/jobs";
 
 describe("worker tender persistence helpers", () => {
@@ -123,5 +126,26 @@ describe("worker tender persistence helpers", () => {
       "Tender closing date has already passed.",
       "No primary tender document was advertised by the source."
     ]));
+  });
+
+  it("rejects malformed adapter payloads before persistence and snapshots", () => {
+    expect(validateSourcePayload({
+      sourceUrl: "not-a-url",
+      title: "",
+      documents: [{ url: "also-not-a-url" }],
+      raw: {}
+    })).toEqual(expect.arrayContaining([
+      expect.stringContaining("sourceUrl"),
+      expect.stringContaining("title"),
+      expect.stringContaining("documents.0.url")
+    ]));
+  });
+
+  it("uses bounded exponential retry and circuit-open delays", () => {
+    expect(retryDelaySeconds(1)).toBe(60);
+    expect(retryDelaySeconds(2)).toBe(120);
+    expect(retryDelaySeconds(20)).toBe(86_400);
+    expect(circuitOpenUntilFor(3, new Date("2026-07-18T00:00:00.000Z"))).toBe("2026-07-18T00:15:00.000Z");
+    expect(circuitOpenUntilFor(4, new Date("2026-07-18T00:00:00.000Z"))).toBe("2026-07-18T00:30:00.000Z");
   });
 });

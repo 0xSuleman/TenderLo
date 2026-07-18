@@ -5,6 +5,7 @@ import {
   closeExpiredTenders,
   ingestAllDueSources,
   ingestSource,
+  processQueuedIngestionJobs,
   rebuildRecommendations,
   sendPendingAlerts
 } from "./jobs";
@@ -36,12 +37,16 @@ async function main(): Promise<void> {
     await closeExpiredTenders();
     return;
   }
+  if (command === "process-ingestion-queue") {
+    await processQueuedIngestionJobs();
+    return;
+  }
   if (command === "backfill-fields") {
     await backfillStoredTenderFields(argument, secondArgument, Number(thirdArgument ?? 0));
     return;
   }
   if (command === "schedule") {
-    cron.schedule("*/15 * * * *", () => {
+    cron.schedule("*/1 * * * *", () => {
       ingestAllDueSources().catch((error) => logger.error("Scheduled ingestion failed.", { error: error instanceof Error ? error.message : String(error) }));
     });
     cron.schedule("*/30 * * * *", () => {
@@ -68,6 +73,7 @@ async function main(): Promise<void> {
   logger.info(`TenderLo worker commands:
   ingest-all
   ingest-source <source-id>
+  process-ingestion-queue
   rebuild-recommendations [organization-id]
   send-alerts
   close-expired

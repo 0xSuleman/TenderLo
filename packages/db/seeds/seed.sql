@@ -197,6 +197,12 @@ values
     'documentPrefix', 'tender_SINDH',
     'knownSourceDomains', array['portalsindh.eprocure.gov.pk','apiprd.eprocure.gov.pk','pprasindh.gov.pk','e.pprasindh.gov.pk','epads.pprasindh.gov.pk','sindh.eprocure.gov.pk','sindhbank.com.pk','educationcity.gos.pk','tenders.iba.edu.pk','uok.edu.pk']
   )),
+  ('KP eProcure Public Tenders', 'https://portalkp.eprocure.gov.pk/#/tenders/Epadtenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-eprocure', 360, 'active', jsonb_build_object(
+    'sourceGroup', 'kp_eprocure',
+    'portalFamily', 'kp_eprocure',
+    'documentPrefix', 'tender_KP_EPROCURE',
+    'knownSourceDomains', array['portalkp.eprocure.gov.pk','apiprd.eprocure.gov.pk','kp.eprocure.gov.pk','kppra.gov.pk']
+  )),
   ('Khyber Pakhtunkhwa PPRA Active Tenders', 'http://www.kppra.gov.pk/kppra/activetenders', 'provincial', 'Khyber Pakhtunkhwa', 'kp-ppra-active', 360, 'active', jsonb_build_object(
     'sourceGroup', 'kp_kppra',
     'portalFamily', 'kp_kppra',

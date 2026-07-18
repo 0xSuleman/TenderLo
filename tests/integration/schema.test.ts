@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { parseTenderIdFromSlug, tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 
 const migration = readFileSync("packages/db/migrations/0001_initial_schema.sql", "utf8");
+const durableQueueMigration = readFileSync("packages/db/migrations/0003_durable_ingestion_jobs.sql", "utf8");
 
 describe("database contract", () => {
   it("creates all critical evidence and QA tables", () => {
@@ -88,5 +89,15 @@ describe("database contract", () => {
     expect(path).toBe(`/tender/road-rehabilitation-works-${id}`);
     expect(parseTenderIdFromSlug(path.split("/").pop() ?? "")).toBe(id);
     expect(parseTenderIdFromSlug("bad-slug")).toBeNull();
+  });
+
+  it("adds a durable, leased ingestion queue and source circuit-breaker state", () => {
+    expect(durableQueueMigration).toContain("create table if not exists ingestion_jobs");
+    expect(durableQueueMigration).toContain("ingestion_jobs_one_active_source_idx");
+    expect(durableQueueMigration).toContain("enqueue_due_ingestion_jobs");
+    expect(durableQueueMigration).toContain("claim_ingestion_jobs");
+    expect(durableQueueMigration).toContain("skip locked");
+    expect(durableQueueMigration).toContain("circuit_open_until");
+    expect(durableQueueMigration).toContain("dead_letter");
   });
 });

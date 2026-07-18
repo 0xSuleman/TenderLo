@@ -136,6 +136,63 @@ describe("public source adapters", () => {
     expect(downloaded.buffer.toString()).toBe("%PDF-1.7 Sindh bidding document");
   });
 
+  it("ingests KP eProcure public rows and its modal-backed SBD/SPD download", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T12:00:00.000Z"));
+    const tender = {
+      ...sindhPpraTender(80646, "EPADS-K-250560595", "2026-08-03T12:00:00"),
+      tenderNumber: "K-250560595",
+      departmentName: "TMA Babuzai",
+      location: "Babuzai",
+      estimatedCost: "12500000"
+    };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const requestUrl = String(url);
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (requestUrl.includes("/getallpublictenders")) {
+        return Response.json({ success: true, data: { totalRecords: 1, totalPages: 1, records: [tender] } });
+      }
+      if (requestUrl.includes("getallpublisheddocumentdetailbypdidpublication")) {
+        return Response.json({ success: true, data: [] });
+      }
+      if (requestUrl.includes("getallpublisheddocumentdetailbypdid")) {
+        return Response.json({ success: true, data: [{
+          dmS_FileID: 91001,
+          dmS_FileGUID: "kp-sbd-guid",
+          documentTemplateName: "SBD SPD",
+          publishedDocumentID: body.Id
+        }] });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const pending = getSourceAdapter("kp-eprocure").fetchTenders({
+      sourceId: "source",
+      sourceName: "KP eProcure",
+      baseUrl: "https://portalkp.eprocure.gov.pk/#/tenders/Epadtenders",
+      adapterKey: "kp-eprocure",
+      userAgent: "test"
+    });
+    await vi.runAllTimersAsync();
+    const tenders = await pending;
+
+    expect(tenders).toHaveLength(1);
+    expect(tenders[0]).toMatchObject({
+      tenderNumber: "EPADS-K-250560595",
+      province: "Khyber Pakhtunkhwa",
+      department: "TMA Babuzai",
+      estimatedValue: 12500000,
+      submissionMethod: "Electronic via KP EPADS"
+    });
+    expect(tenders[0]?.documents[0]).toMatchObject({
+      filename: "EPADS-K-250560595-SBD-SPD.pdf",
+      sourceDocumentKey: "kp_eprocure_bidding_91001",
+      downloadRequest: { body: { loggedInUserOfficeID: 31603, ID: 91001, idsList: "kp-sbd-guid" } }
+    });
+    const listingCall = fetchSpy.mock.calls.find(([url]) => String(url).includes("/getallpublictenders"));
+    expect(listingCall?.[1]?.headers).toMatchObject({ officedetail: "KPK-PPRA-Dev" });
+  });
+
   it("ingests every paginated Federal EPADS row with full tooltip values and official PDFs", async () => {
     const firstPageRows = Array.from({ length: 100 }, (_, index) => federalEpadsRow(53111 + index, index + 1)).join("");
     const listingPageOne = federalEpadsListing(firstPageRows, '<a href="/?page=2">2</a>');

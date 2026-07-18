@@ -26,6 +26,31 @@ const inaccessiblePatterns = [
   /not authorized/i
 ];
 
+/**
+ * Public-page fallback for portals whose public HTML is rendered only in a
+ * browser. Adapters should prefer documented public JSON/HTML requests and
+ * call this only when rendering is genuinely required. It deliberately does
+ * not solve CAPTCHA, login, paywall, or other access-control challenges.
+ */
+export async function fetchRenderedPublicPage(url: string, userAgent = defaultUserAgent): Promise<string> {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ userAgent });
+    const response = await page.goto(url, { waitUntil: "networkidle", timeout: 45_000 });
+    if (!response || !response.ok()) {
+      throw new SourceFetchError(`Public browser request returned HTTP ${response?.status() ?? "no response"}.`);
+    }
+    const html = await page.content();
+    if (inaccessiblePatterns.some((pattern) => pattern.test(html))) {
+      throw new PermanentSourceError("The public source requires access that TenderLo will not bypass.");
+    }
+    return html;
+  } finally {
+    await browser.close();
+  }
+}
+
 type SelectorProfile = {
   rowSelector: string;
   linkSelector?: string;
@@ -1645,6 +1670,19 @@ const sindhPpraProfile: SourceProfile = {
   defaultSubmissionMethod: "Electronic via Sindh EPADS"
 };
 
+const kpEprocureProfile: SourceProfile = {
+  key: "kp-eprocure",
+  name: "KP eProcure",
+  sourceType: "provincial",
+  region: "Khyber Pakhtunkhwa",
+  sourceGroup: "kp_eprocure",
+  documentPrefix: "tender_KP_EPROCURE",
+  portalFamily: "kp_eprocure",
+  knownSourceDomains: ["portalkp.eprocure.gov.pk", "apiprd.eprocure.gov.pk", "kp.eprocure.gov.pk", "kppra.gov.pk"],
+  listing: { rowSelector: "section" },
+  defaultSubmissionMethod: "Electronic via KP EPADS"
+};
+
 type SindhPpraTenderRecord = {
   publishedDocumentID?: number;
   tR_DocumentTemplateID?: number;
@@ -1715,6 +1753,41 @@ const sindhPpraPageSize = 500;
 const sindhPpraMaxPages = 20;
 const sindhPpraDocumentConcurrency = 5;
 
+type EprocurePortalConfig = {
+  label: string;
+  portalUrl: string;
+  officeId: number;
+  officeDetail: string;
+  documentKeyPrefix: string;
+  pageSize: number;
+  maxPages: number;
+  documentConcurrency: number;
+};
+
+const sindhEprocureConfig: EprocurePortalConfig = {
+  label: "Sindh SPPRA",
+  portalUrl: sindhPpraPortalUrl,
+  officeId: sindhPpraOfficeId,
+  officeDetail: "Sindh-PPRA-Dev",
+  documentKeyPrefix: "sindh_sppra",
+  pageSize: sindhPpraPageSize,
+  maxPages: sindhPpraMaxPages,
+  documentConcurrency: sindhPpraDocumentConcurrency
+};
+
+const kpEprocureConfig: EprocurePortalConfig = {
+  label: "KP eProcure",
+  portalUrl: "https://portalkp.eprocure.gov.pk/",
+  officeId: 31603,
+  officeDetail: "KPK-PPRA-Dev",
+  documentKeyPrefix: "kp_eprocure",
+  // The public UI renders 10 cards but the underlying public endpoint accepts 500.
+  // This keeps the complete current-tender scan polite and bounded.
+  pageSize: 500,
+  maxPages: 60,
+  documentConcurrency: 5
+};
+
 export class SindhPpraAdapter implements SourceAdapter {
   readonly respectsRobotsTxt = true;
   readonly key = sindhPpraProfile.key;
@@ -1722,8 +1795,28 @@ export class SindhPpraAdapter implements SourceAdapter {
   readonly sourceType: SourceType = sindhPpraProfile.sourceType;
 
   async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
-    const profile = resolveProfileMetadata(sindhPpraProfile, context.metadata);
-    const firstPage = await fetchSindhPpraListingPage(1, context.userAgent);
+    return fetchEprocureTenders(sindhPpraProfile, sindhEprocureConfig, context);
+  }
+}
+
+export class KpEprocureAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = kpEprocureProfile.key;
+  readonly name = kpEprocureProfile.name;
+  readonly sourceType: SourceType = kpEprocureProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    return fetchEprocureTenders(kpEprocureProfile, kpEprocureConfig, context);
+  }
+}
+
+async function fetchEprocureTenders(
+  sourceProfile: SourceProfile,
+  portal: EprocurePortalConfig,
+  context: SourceAdapterContext
+): Promise<RawTenderPayload[]> {
+    const profile = resolveProfileMetadata(sourceProfile, context.metadata);
+    const firstPage = await fetchSindhPpraListingPage(1, context.userAgent, portal);
     const firstRecords = firstPage.data?.records;
     if (firstPage.success !== true || !Array.isArray(firstRecords)) {
       throw new SourceFetchError("Sindh SPPRA returned an invalid tender-list response.");
@@ -1732,17 +1825,17 @@ export class SindhPpraAdapter implements SourceAdapter {
     const totalRecords = Number(firstPage.data?.totalRecords ?? firstRecords.length);
     const pageCount = Number.isInteger(reportedPages) && reportedPages > 0
       ? reportedPages
-      : Math.max(1, Math.ceil(totalRecords / sindhPpraPageSize));
-    if (!Number.isInteger(pageCount) || pageCount > sindhPpraMaxPages) {
-      throw new SourceFetchError(`Sindh SPPRA reported an unsafe page count (${pageCount}).`);
+      : Math.max(1, Math.ceil(totalRecords / portal.pageSize));
+    if (!Number.isInteger(pageCount) || pageCount > portal.maxPages) {
+      throw new SourceFetchError(`${portal.label} reported an unsafe page count (${pageCount}).`);
     }
 
     const pageRecords = [firstRecords];
     for (let page = 2; page <= pageCount; page += 1) {
       await sleep(sourceRuntimeConfig.politeRequestDelayMs);
-      const response = await fetchSindhPpraListingPage(page, context.userAgent);
+      const response = await fetchSindhPpraListingPage(page, context.userAgent, portal);
       if (response.success !== true || !Array.isArray(response.data?.records)) {
-        throw new SourceFetchError(`Sindh SPPRA returned an invalid response for page ${page}.`);
+        throw new SourceFetchError(`${portal.label} returned an invalid response for page ${page}.`);
       }
       pageRecords.push(response.data.records);
     }
@@ -1759,31 +1852,30 @@ export class SindhPpraAdapter implements SourceAdapter {
 
     const payloads: RawTenderPayload[] = [];
     let primaryLookupSuccesses = 0;
-    for (let offset = 0; offset < currentRecords.length; offset += sindhPpraDocumentConcurrency) {
-      const batch = currentRecords.slice(offset, offset + sindhPpraDocumentConcurrency);
+    for (let offset = 0; offset < currentRecords.length; offset += portal.documentConcurrency) {
+      const batch = currentRecords.slice(offset, offset + portal.documentConcurrency);
       const batchResults = await Promise.all(batch.map(async (record) => {
-        const lookup = await fetchSindhPpraDocumentLookup(record, context.userAgent);
+        const lookup = await fetchSindhPpraDocumentLookup(record, context.userAgent, portal);
         if (lookup.primarySucceeded && lookup.primary.some(sindhPpraDocumentIsUsable)) primaryLookupSuccesses += 1;
-        return buildSindhPpraPayload(record, lookup, profile);
+        return buildSindhPpraPayload(record, lookup, profile, portal);
       }));
       payloads.push(...batchResults);
-      if (offset + sindhPpraDocumentConcurrency < currentRecords.length) {
+      if (offset + portal.documentConcurrency < currentRecords.length) {
         await sleep(sourceRuntimeConfig.politeRequestDelayMs);
       }
     }
 
     if (currentRecords.length >= 10 && primaryLookupSuccesses / currentRecords.length < 0.8) {
-      throw new SourceFetchError(`Sindh SPPRA bidding-document lookup coverage fell below the safe threshold (${primaryLookupSuccesses}/${currentRecords.length}).`);
+      throw new SourceFetchError(`${portal.label} bidding-document lookup coverage fell below the safe threshold (${primaryLookupSuccesses}/${currentRecords.length}).`);
     }
     return payloads;
-  }
 }
 
-function sindhPpraListingRequest(page: number): Record<string, unknown> {
+function sindhPpraListingRequest(page: number, portal: EprocurePortalConfig): Record<string, unknown> {
   return {
     pagination: {
       pageNumber: String(page),
-      pageSize: String(sindhPpraPageSize),
+      pageSize: String(portal.pageSize),
       orderBy: "",
       orderByColumnName: "PublishedDate",
       approvalStatusID: 0,
@@ -1800,19 +1892,18 @@ function sindhPpraListingRequest(page: number): Record<string, unknown> {
       selectedWorth: null
     },
     loggedInUserID: 1,
-    loggedInUserOfficeID: sindhPpraOfficeId
+    loggedInUserOfficeID: portal.officeId
   };
 }
 
-async function fetchSindhPpraListingPage(page: number, userAgent: string): Promise<SindhPpraApiResponse<SindhPpraListingData>> {
+async function fetchSindhPpraListingPage(page: number, userAgent: string, portal: EprocurePortalConfig): Promise<SindhPpraApiResponse<SindhPpraListingData>> {
   return fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraListingData>>(
     `${sindhPpraApiBaseUrl}/getallpublictenders`,
-    sindhPpraListingRequest(page),
-    userAgent
+    sindhPpraListingRequest(page, portal), userAgent, portal
   );
 }
 
-async function fetchSindhPpraDocumentLookup(record: SindhPpraTenderRecord, userAgent: string): Promise<SindhPpraDocumentLookup> {
+async function fetchSindhPpraDocumentLookup(record: SindhPpraTenderRecord, userAgent: string, portal: EprocurePortalConfig): Promise<SindhPpraDocumentLookup> {
   const publishedDocumentId = Number(record.publishedDocumentID);
   if (!Number.isInteger(publishedDocumentId) || publishedDocumentId <= 0) {
     return {
@@ -1826,7 +1917,7 @@ async function fetchSindhPpraDocumentLookup(record: SindhPpraTenderRecord, userA
   const request = {
     Id: publishedDocumentId,
     loggedInUserID: 1,
-    loggedInUserOfficeID: 1
+    loggedInUserOfficeID: portal.officeId
   };
   const publicationRequest = {
     ...request,
@@ -1837,12 +1928,12 @@ async function fetchSindhPpraDocumentLookup(record: SindhPpraTenderRecord, userA
     fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraDocumentRecord[]>>(
       `${sindhPpraApiBaseUrl}/getallpublisheddocumentdetailbypdid`,
       request,
-      userAgent
+      userAgent, portal
     ),
     fetchSindhPpraJson<SindhPpraApiResponse<SindhPpraDocumentRecord[]>>(
       `${sindhPpraApiBaseUrl}/getallpublisheddocumentdetailbypdidpublication`,
       publicationRequest,
-      userAgent
+      userAgent, portal
     )
   ]);
   const primarySucceeded = primaryResult.status === "fulfilled" && primaryResult.value.success === true && Array.isArray(primaryResult.value.data);
@@ -1872,7 +1963,8 @@ function sindhPpraLookupError(
 function buildSindhPpraPayload(
   record: SindhPpraTenderRecord,
   lookup: SindhPpraDocumentLookup,
-  profile: SourceProfile
+  profile: SourceProfile,
+  portal: EprocurePortalConfig
 ): RawTenderPayload {
   const tenderNumber = cleanOptional(record.tenderNumbers) ?? cleanOptional(record.tenderNumber);
   const title = cleanOptional(record.name);
@@ -1885,13 +1977,13 @@ function buildSindhPpraPayload(
   const openingDate = parseSindhPpraDateTime(record.bidOpeningDate);
   const estimatedValue = parseMoney(record.estimatedCost === null || record.estimatedCost === undefined ? undefined : String(record.estimatedCost));
   const procurementMethod = cleanOptional(record.procurementProcedure ?? undefined) ?? cleanOptional(record.procurementMethod ?? undefined);
-  const sourceUrl = new URL(sindhPpraPortalUrl);
+  const sourceUrl = new URL(portal.portalUrl);
   sourceUrl.searchParams.set("tenderNo", tenderNumber);
   const primaryDocuments = lookup.primary
-    .map((document) => sindhPpraDocument(document, tenderNumber, "bidding"))
+    .map((document) => sindhPpraDocument(document, tenderNumber, "bidding", portal))
     .filter((document): document is NonNullable<typeof document> => Boolean(document));
   const publicationDocuments = lookup.publications
-    .map((document) => sindhPpraDocument(document, tenderNumber, document.isCorrigendum ? "corrigendum" : "publication"))
+    .map((document) => sindhPpraDocument(document, tenderNumber, document.isCorrigendum ? "corrigendum" : "publication", portal))
     .filter((document): document is NonNullable<typeof document> => Boolean(document));
   const unusableDocumentDetails = lookup.primary.length + lookup.publications.length - primaryDocuments.length - publicationDocuments.length;
   const documentLookupErrors = [
@@ -1922,8 +2014,8 @@ function buildSindhPpraPayload(
     documents,
     procurementMethod,
     sourceStatus: cleanOptional(record.statusName),
-    websiteUrl: sindhPpraPortalUrl,
-    rawHtml: `<script type="application/json" data-sindh-published-document-id="${record.publishedDocumentID ?? ""}">${escapeHtml(JSON.stringify(record))}</script>`
+    websiteUrl: portal.portalUrl,
+    rawHtml: `<script type="application/json" data-eprocure-published-document-id="${record.publishedDocumentID ?? ""}">${escapeHtml(JSON.stringify(record))}</script>`
   });
   if (openingDate) payload.openingDate = openingDate;
   if (record.procurementCategory) payload.procurementCategory = normalizeWhitespace(record.procurementCategory);
@@ -1949,7 +2041,7 @@ function buildSindhPpraPayload(
     publishedDocumentId: record.publishedDocumentID,
     documentTemplateId: record.tR_DocumentTemplateID,
     procurementPlansDetailId: record.procurementPlansDetailID,
-    officeId: record.officeID,
+    officeId: record.officeID ?? portal.officeId,
     sourceTenderNumber: record.tenderNumber,
     sourceStatus: record.statusName,
     bidValidityDate: sindhPpraCalendarDate(record.bidValidityDate),
@@ -1985,7 +2077,8 @@ function sindhPpraDocumentSnapshot(record: SindhPpraDocumentRecord): SindhPpraDo
 function sindhPpraDocument(
   record: SindhPpraDocumentRecord,
   tenderNumber: string,
-  kind: "bidding" | "publication" | "corrigendum"
+  kind: "bidding" | "publication" | "corrigendum",
+  portal: EprocurePortalConfig
 ): RawTenderPayload["documents"][number] | undefined {
   const fileId = Number(record.dmS_FileID);
   const guid = cleanOptional(record.dmS_FileGUID);
@@ -1998,12 +2091,12 @@ function sindhPpraDocument(
     url: url.toString(),
     filename: `${sindhPpraFilenamePart(tenderNumber)}-${sindhPpraFilenamePart(templateName)}.pdf`,
     mimeType: "application/pdf",
-    sourceDocumentKey: `sindh_sppra_${kind}_${fileId}`,
+    sourceDocumentKey: `${portal.documentKeyPrefix}_${kind}_${fileId}`,
     downloadRequest: {
       method: "POST",
-      headers: sindhPpraPublicHeaders(),
+      headers: sindhPpraPublicHeaders(portal),
       body: safeJson({
-        loggedInUserOfficeID: sindhPpraOfficeId,
+        loggedInUserOfficeID: portal.officeId,
         loggedInUserID: 1,
         ID: fileId,
         idsList: guid
@@ -2063,24 +2156,24 @@ export function parseSindhPpraDateTime(value: string | undefined): string | unde
   return new Date(local.getTime() - 5 * 60 * 60 * 1000).toISOString();
 }
 
-function sindhPpraPublicHeaders(): Record<string, string> {
+function sindhPpraPublicHeaders(portal: EprocurePortalConfig = sindhEprocureConfig): Record<string, string> {
   return {
     authorization: "Basic YWRtaW46cHByYTEy",
     "content-type": "application/json",
-    officedetail: "Sindh-PPRA-Dev",
-    origin: sindhPpraPortalUrl.slice(0, -1),
-    referer: sindhPpraPortalUrl
+    officedetail: portal.officeDetail,
+    origin: portal.portalUrl.slice(0, -1),
+    referer: portal.portalUrl
   };
 }
 
-async function fetchSindhPpraJson<T>(url: string, body: Record<string, unknown>, userAgent: string): Promise<T> {
+async function fetchSindhPpraJson<T>(url: string, body: Record<string, unknown>, userAgent: string, portal: EprocurePortalConfig = sindhEprocureConfig): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          ...sindhPpraPublicHeaders(),
+          ...sindhPpraPublicHeaders(portal),
           "user-agent": userAgent,
           accept: "application/json"
         },
@@ -2090,9 +2183,9 @@ async function fetchSindhPpraJson<T>(url: string, body: Record<string, unknown>,
         dispatcher: insecureAgent
       } as any);
       const text = await response.text();
-      if (!response.ok) throw new SourceFetchError(`Sindh SPPRA returned HTTP ${response.status}.`);
+      if (!response.ok) throw new SourceFetchError(`${portal.label} returned HTTP ${response.status}.`);
       const parsed = JSON.parse(text) as SindhPpraApiResponse<unknown>;
-      if (parsed.success !== true) throw new SourceFetchError(parsed.responseMessage || "Sindh SPPRA rejected the public API request.");
+      if (parsed.success !== true) throw new SourceFetchError(parsed.responseMessage || `${portal.label} rejected the public API request.`);
       return parsed as T;
     } catch (error) {
       lastError = error;
@@ -2100,7 +2193,7 @@ async function fetchSindhPpraJson<T>(url: string, body: Record<string, unknown>,
       await sleep(1_500);
     }
   }
-  throw new SourceFetchError(lastError instanceof Error ? lastError.message : "Sindh SPPRA request failed.");
+  throw new SourceFetchError(lastError instanceof Error ? lastError.message : `${portal.label} request failed.`);
 }
 
 abstract class OcrNewspaperAdapter implements SourceAdapter {
@@ -2277,6 +2370,7 @@ export const sourceAdapters: SourceAdapter[] = [
   new FederalPpraAdapter(),
   new PunjabPpraAdapter(),
   new SindhPpraAdapter(),
+  new KpEprocureAdapter(),
   new KpPpraAdapter(),
   new BalochistanBppraAdapter(),
   newspaperAdapter("business-recorder-tenders", "Business Recorder Tenders", "https://www.brecorder.com/business-finance/tenders"),

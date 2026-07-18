@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@tenderlo/shared": "^0.1.0",
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "playwright": "^1.61.1"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

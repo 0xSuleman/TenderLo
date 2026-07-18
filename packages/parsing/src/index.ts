@@ -8,6 +8,17 @@ import { logger, normalizeWhitespace, parsingRuntimeConfig, type ParseDocumentIn
 
 const execFileAsync = promisify(execFile);
 let availableTesseractLanguages: string[] | null = null;
+let openCvPreprocessingAvailable: boolean | null = null;
+
+const openCvPreprocessor = [
+  "import cv2, sys",
+  "image = cv2.imread(sys.argv[1], cv2.IMREAD_GRAYSCALE)",
+  "if image is None: raise RuntimeError('OpenCV could not read the image')",
+  "denoised = cv2.fastNlMeansDenoising(image, None, 10, 7, 21)",
+  "enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(denoised)",
+  "processed = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11)",
+  "if not cv2.imwrite(sys.argv[2], processed): raise RuntimeError('OpenCV could not write the processed image')"
+].join("\n");
 
 export async function parseDocument(input: ParseDocumentInput): Promise<ParseDocumentResult> {
   try {
@@ -127,9 +138,10 @@ export async function runOcr(input: ParseDocumentInput): Promise<ParseDocumentRe
   const inputPath = join(workdir, `document${extension}`);
   try {
     await writeFile(inputPath, input.buffer);
+    const ocrInputPath = await preprocessOcrImage(inputPath, workdir, input);
     logger.info("Starting local Tesseract OCR.", { sourceUrl: input.sourceUrl, filename: input.filename });
     const languages = await resolveTesseractLanguages(input);
-    const { stdout } = await execFileAsync("tesseract", [inputPath, "stdout", "-l", languages], {
+    const { stdout } = await execFileAsync("tesseract", [ocrInputPath, "stdout", "-l", languages], {
       timeout: parsingRuntimeConfig.ocrTimeoutMs,
       maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
     });
@@ -206,7 +218,8 @@ export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumen
     const pages: ParsedDocumentPage[] = [];
     for (const [index, pageFile] of pageFiles.entries()) {
       const pagePath = join(workdir, pageFile);
-      const { stdout } = await execFileAsync("tesseract", [pagePath, "stdout", "-l", languages], {
+      const ocrInputPath = await preprocessOcrImage(pagePath, workdir, input);
+      const { stdout } = await execFileAsync("tesseract", [ocrInputPath, "stdout", "-l", languages], {
         timeout: parsingRuntimeConfig.ocrTimeoutMs,
         maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
       });
@@ -251,6 +264,27 @@ export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumen
     };
   } finally {
     await rm(workdir, { recursive: true, force: true });
+  }
+}
+
+async function preprocessOcrImage(inputPath: string, workdir: string, input: ParseDocumentInput): Promise<string> {
+  if (openCvPreprocessingAvailable === false) return inputPath;
+  const outputPath = join(workdir, `preprocessed-${Math.random().toString(36).slice(2)}.png`);
+  try {
+    await execFileAsync(process.env.TENDERLO_PYTHON_COMMAND || "python", ["-c", openCvPreprocessor, inputPath, outputPath], {
+      timeout: Math.min(parsingRuntimeConfig.ocrTimeoutMs, 30_000),
+      maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
+    });
+    openCvPreprocessingAvailable = true;
+    return outputPath;
+  } catch (error) {
+    openCvPreprocessingAvailable = false;
+    logger.warn("OpenCV preprocessing is unavailable; using the original image for local Tesseract OCR.", {
+      sourceUrl: input.sourceUrl,
+      filename: input.filename,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return inputPath;
   }
 }
 

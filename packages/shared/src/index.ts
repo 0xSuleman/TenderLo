@@ -36,6 +36,7 @@ export const duplicateStatuses = ["pending", "merged", "rejected"] as const;
 export const engineerTypes = ["PE", "RE", "trainee", "unknown"] as const;
 export const equipmentOwnershipTypes = ["owned", "leased", "rented", "unknown"] as const;
 export const invoiceStatuses = ["draft", "sent", "paid", "void", "overdue"] as const;
+export const ingestionJobStatuses = ["queued", "leased", "succeeded", "failed", "dead_letter", "cancelled"] as const;
 
 export const contractorSectors = [
   "construction",
@@ -167,6 +168,7 @@ export type TenderStatus = (typeof tenderStatuses)[number];
 export type SourceType = (typeof sourceTypes)[number];
 export type SourceStatus = (typeof sourceStatuses)[number];
 export type IngestionStatus = (typeof ingestionStatuses)[number];
+export type IngestionJobStatus = (typeof ingestionJobStatuses)[number];
 export type ParserStatus = (typeof parserStatuses)[number];
 export type OcrStatus = (typeof ocrStatuses)[number];
 export type ExtractionMethod = (typeof extractionMethods)[number];
@@ -481,6 +483,32 @@ export interface RawTenderPayload {
   raw: Json;
   rawSnapshot?: RawSourceSnapshotPayload;
 }
+
+const runtimeDateTimeSchema = z.string().trim().refine((value) => !Number.isNaN(Date.parse(value)), "Expected a valid date or datetime.");
+
+/** Runtime boundary for untrusted adapter output before it reaches persistence. */
+export const rawTenderPayloadRuntimeSchema = z.object({
+  sourceUrl: z.string().trim().url().max(2_000),
+  title: nonEmptyString.max(500),
+  tenderNumber: z.string().trim().max(160).optional(),
+  department: z.string().trim().max(240).optional(),
+  procurementCategory: z.string().trim().max(240).optional(),
+  province: z.string().trim().max(120).optional(),
+  city: z.string().trim().max(120).optional(),
+  description: z.string().trim().max(20_000).optional(),
+  advertisementDate: runtimeDateTimeSchema.optional(),
+  closingDate: runtimeDateTimeSchema.optional(),
+  openingDate: runtimeDateTimeSchema.optional(),
+  bidSecurityAmount: z.number().finite().nonnegative().optional(),
+  estimatedValue: z.number().finite().nonnegative().optional(),
+  documentFee: z.number().finite().nonnegative().optional(),
+  documents: z.array(z.object({
+    url: z.string().trim().url().max(2_000),
+    filename: z.string().trim().max(500).optional(),
+    mimeType: z.string().trim().max(160).optional()
+  }).passthrough()).max(20),
+  raw: z.unknown()
+}).passthrough();
 
 export interface SourceAdapterContext {
   sourceId: string;

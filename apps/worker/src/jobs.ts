@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { createQaTask, createServiceClient, type DatabaseClient } from "@tenderlo/db";
 import {
@@ -17,12 +17,14 @@ import { mergeParsedPages, parseDocument } from "@tenderlo/parsing";
 import { rebuildRecommendationRecords } from "@tenderlo/scoring";
 import {
   logger,
+  ingestionRuntimeConfig,
   normalizeForSearch,
   normalizeWhitespace,
   pipelineRuntimeConfig,
   safeJson,
   sourceRuntimeConfig,
   PermanentSourceError,
+  rawTenderPayloadRuntimeSchema,
   type ExtractedFieldResult,
   type Json,
   type ParseDocumentResult,
@@ -31,7 +33,63 @@ import {
 } from "@tenderlo/shared";
 import { createSourceContext, fetchBinary, getSourceAdapter, isKnownSourceDomain, normalizeSourceHostname } from "@tenderlo/sources";
 
+type ClaimedIngestionJob = {
+  id: string;
+  source_id: string;
+  attempt_count: number;
+  max_attempts: number;
+  lease_token: string | null;
+};
+
+type IngestionMetrics = {
+  rejected: number;
+  documentsAdvertised: number;
+  documentsDownloaded: number;
+  documentsFailed: number;
+  snapshotsStored: number;
+};
+
 export async function ingestAllDueSources(): Promise<void> {
+  const supabase = createServiceClient();
+  const { error } = await supabase.rpc("enqueue_due_ingestion_jobs");
+  if (error) {
+    if (isMissingQueueSchemaError(error)) {
+      logger.warn("Durable ingestion queue migration has not been applied; using the direct scheduler temporarily.");
+      await ingestAllDueSourcesLegacy();
+      return;
+    }
+    throw error;
+  }
+  await processQueuedIngestionJobs(supabase);
+}
+
+/** Processes durable jobs. Safe for concurrent worker instances because claim_ingestion_jobs uses SKIP LOCKED. */
+export async function processQueuedIngestionJobs(supabase = createServiceClient()): Promise<number> {
+  const workerToken = randomUUID();
+  const { data, error } = await supabase.rpc("claim_ingestion_jobs", {
+    p_worker_token: workerToken,
+    p_limit: ingestionRuntimeConfig.queueBatchSize,
+    p_lease_seconds: ingestionRuntimeConfig.leaseSeconds
+  });
+  if (error) throw error;
+
+  let processed = 0;
+  for (const job of (data ?? []) as ClaimedIngestionJob[]) {
+    try {
+      await ingestSource(job.source_id, job);
+    } catch (error) {
+      logger.error("Ingestion job failed; its retry or dead-letter state was persisted.", {
+        jobId: job.id,
+        sourceId: job.source_id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    processed += 1;
+  }
+  return processed;
+}
+
+async function ingestAllDueSourcesLegacy(): Promise<void> {
   const supabase = createServiceClient();
   const { data: sources, error } = await supabase
     .from("tender_sources")
@@ -75,16 +133,19 @@ export async function ingestAllDueSources(): Promise<void> {
   }
 }
 
-export async function ingestSource(sourceId: string): Promise<void> {
+export async function ingestSource(sourceId: string, job?: ClaimedIngestionJob): Promise<void> {
   const supabase = createServiceClient();
   const { data: source, error: sourceError } = await supabase.from("tender_sources").select("*").eq("id", sourceId).maybeSingle();
   if (sourceError) throw sourceError;
   if (!source) throw new Error(`Tender source ${sourceId} was not found.`);
-  if (source.status === "disabled") return;
+  if (source.status === "disabled") {
+    if (job) await completeIngestionJob(supabase, job, "cancelled");
+    return;
+  }
 
   const { data: run, error: runError } = await supabase
     .from("ingestion_runs")
-    .insert({ source_id: source.id, status: "running" })
+    .insert({ source_id: source.id, status: "running", ...(job ? { job_id: job.id } : {}) })
     .select("*")
     .single();
   if (runError) throw runError;
@@ -92,6 +153,13 @@ export async function ingestSource(sourceId: string): Promise<void> {
   let created = 0;
   let updated = 0;
   let duplicates = 0;
+  const metrics: IngestionMetrics = {
+    rejected: 0,
+    documentsAdvertised: 0,
+    documentsDownloaded: 0,
+    documentsFailed: 0,
+    snapshotsStored: 0
+  };
 
   try {
     await supabase.from("tender_sources").update({ last_run_at: new Date().toISOString() }).eq("id", source.id);
@@ -102,35 +170,64 @@ export async function ingestSource(sourceId: string): Promise<void> {
     const documentBudget = { remaining: sourceRuntimeConfig.maxDocumentDownloadsPerSourceRun };
 
     for (const payload of payloads) {
+      const payloadErrors = validateSourcePayload(payload);
+      if (payloadErrors.length) {
+        metrics.rejected += 1;
+        await createMalformedPayloadQaTask(supabase, source as any, payload, payloadErrors);
+        continue;
+      }
+      metrics.documentsAdvertised += payload.documents.length;
       await storeRawSnapshot(supabase, source as any, run as any, payload);
+      metrics.snapshotsStored += 1;
       const outcome = await upsertTenderFromPayload(supabase, source as any, payload, documentBudget);
-      if (!outcome.admitted) continue;
+      if (!outcome.admitted) {
+        metrics.rejected += 1;
+        continue;
+      }
       if (outcome.created) created += 1;
       else updated += 1;
       if (outcome.duplicatesFound) duplicates += outcome.duplicatesFound;
+      metrics.documentsDownloaded += outcome.documentsDownloaded;
+      metrics.documentsFailed += outcome.documentsFailed;
       await createSavedSearchNotificationsForTender(supabase, outcome.tenderId);
     }
 
     await supabase
       .from("ingestion_runs")
       .update({
-        status: "succeeded",
+        status: metrics.rejected ? "partial" : "succeeded",
         completed_at: new Date().toISOString(),
         tenders_seen: payloads.length,
         tenders_created: created,
         tenders_updated: updated,
-        duplicates_found: duplicates
+        duplicates_found: duplicates,
+        tenders_rejected: metrics.rejected,
+        documents_advertised: metrics.documentsAdvertised,
+        documents_downloaded: metrics.documentsDownloaded,
+        documents_failed: metrics.documentsFailed,
+        snapshots_stored: metrics.snapshotsStored,
+        error_message: metrics.rejected ? `${metrics.rejected} payload(s) rejected by validation or admission rules.` : null
       })
       .eq("id", run.id);
 
     await supabase
       .from("tender_sources")
-      .update({ status: "active", last_success_at: new Date().toISOString(), consecutive_failures: 0 })
+      .update({
+        status: "active",
+        last_success_at: new Date().toISOString(),
+        consecutive_failures: 0,
+        circuit_open_until: null,
+        last_error: null
+      })
       .eq("id", source.id);
+    if (job) await completeIngestionJob(supabase, job, "succeeded", run.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown ingestion error";
     const permanentFailure = error instanceof PermanentSourceError;
     const nextFailures = Number(source.consecutive_failures ?? 0) + 1;
+    const circuitOpenUntil = permanentFailure || nextFailures < ingestionRuntimeConfig.circuitFailureThreshold
+      ? null
+      : circuitOpenUntilFor(nextFailures);
     await supabase
       .from("ingestion_runs")
       .update({
@@ -139,14 +236,25 @@ export async function ingestSource(sourceId: string): Promise<void> {
         tenders_created: created,
         tenders_updated: updated,
         duplicates_found: duplicates,
+        tenders_rejected: metrics.rejected,
+        documents_advertised: metrics.documentsAdvertised,
+        documents_downloaded: metrics.documentsDownloaded,
+        documents_failed: metrics.documentsFailed,
+        snapshots_stored: metrics.snapshotsStored,
         error_message: message
       })
       .eq("id", run.id);
     await supabase
       .from("tender_sources")
-      .update({ status: permanentFailure || nextFailures >= 3 ? "failing" : "active", consecutive_failures: nextFailures })
+      .update({
+        status: permanentFailure ? "failing" : "active",
+        consecutive_failures: nextFailures,
+        circuit_open_until: circuitOpenUntil,
+        last_failure_at: new Date().toISOString(),
+        last_error: message
+      })
       .eq("id", source.id);
-    if (permanentFailure || nextFailures >= 3) {
+    if (permanentFailure || nextFailures >= ingestionRuntimeConfig.circuitFailureThreshold) {
       await createQaTask(supabase, {
         sourceId: source.id,
         taskType: "source_failure",
@@ -155,8 +263,113 @@ export async function ingestSource(sourceId: string): Promise<void> {
         details: safeJson({ error: message, source_id: source.id, permanent: permanentFailure })
       });
     }
+    if (job) await retryOrDeadLetterIngestionJob(supabase, job, message, permanentFailure, run.id);
     throw error;
   }
+}
+
+export function validateSourcePayload(payload: unknown): string[] {
+  const result = rawTenderPayloadRuntimeSchema.safeParse(payload);
+  if (result.success) return [];
+  return result.error.issues.map((issue) => `${issue.path.join(".") || "payload"}: ${issue.message}`);
+}
+
+export function retryDelaySeconds(attemptCount: number): number {
+  const exponent = Math.max(0, attemptCount - 1);
+  return Math.min(
+    ingestionRuntimeConfig.retryBaseDelaySeconds * (2 ** exponent),
+    ingestionRuntimeConfig.retryMaxDelaySeconds
+  );
+}
+
+export function circuitOpenUntilFor(consecutiveFailures: number, now = new Date()): string {
+  const exponent = Math.max(0, consecutiveFailures - ingestionRuntimeConfig.circuitFailureThreshold);
+  const delayMinutes = Math.min(
+    ingestionRuntimeConfig.circuitBaseDelayMinutes * (2 ** exponent),
+    ingestionRuntimeConfig.circuitMaxDelayMinutes
+  );
+  return new Date(now.getTime() + delayMinutes * 60_000).toISOString();
+}
+
+async function completeIngestionJob(
+  supabase: DatabaseClient,
+  job: ClaimedIngestionJob,
+  status: "succeeded" | "cancelled",
+  ingestionRunId?: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("ingestion_jobs")
+    .update({
+      status,
+      ingestion_run_id: ingestionRunId ?? null,
+      completed_at: new Date().toISOString(),
+      lease_token: null,
+      lease_expires_at: null,
+      last_error: null
+    })
+    .eq("id", job.id)
+    .eq("lease_token", job.lease_token);
+  if (error) throw error;
+}
+
+async function retryOrDeadLetterIngestionJob(
+  supabase: DatabaseClient,
+  job: ClaimedIngestionJob,
+  message: string,
+  permanentFailure: boolean,
+  ingestionRunId: string
+): Promise<void> {
+  const exhausted = permanentFailure || job.attempt_count >= job.max_attempts;
+  const status = exhausted ? "dead_letter" : "queued";
+  const scheduledFor = exhausted
+    ? new Date().toISOString()
+    : new Date(Date.now() + retryDelaySeconds(job.attempt_count) * 1_000).toISOString();
+  const { error } = await supabase
+    .from("ingestion_jobs")
+    .update({
+      status,
+      scheduled_for: scheduledFor,
+      ingestion_run_id: ingestionRunId,
+      completed_at: exhausted ? new Date().toISOString() : null,
+      lease_token: null,
+      lease_expires_at: null,
+      last_error: message
+    })
+    .eq("id", job.id)
+    .eq("lease_token", job.lease_token);
+  if (error) throw error;
+
+  if (exhausted) {
+    await createQaTask(supabase, {
+      sourceId: job.source_id,
+      taskType: "source_failure",
+      priority: "urgent",
+      title: `Ingestion job moved to dead letter after ${job.attempt_count} attempt(s)`,
+      details: safeJson({ jobId: job.id, sourceId: job.source_id, error: message, permanent: permanentFailure })
+    });
+  }
+}
+
+function isMissingQueueSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String((error as { message?: unknown } | null)?.message ?? error);
+  return /enqueue_due_ingestion_jobs|ingestion_jobs|could not find.*function|does not exist/i.test(message);
+}
+
+async function createMalformedPayloadQaTask(
+  supabase: DatabaseClient,
+  source: { id: string; name: string },
+  payload: unknown,
+  reasons: string[]
+): Promise<void> {
+  const candidate = typeof payload === "object" && payload !== null ? payload as Partial<RawTenderPayload> : {};
+  const tenderNumber = typeof candidate.tenderNumber === "string" ? candidate.tenderNumber.trim() : "";
+  await createQaTask(supabase, {
+    sourceId: source.id,
+    taskType: "parser_failure",
+    priority: "high",
+    title: `Source payload rejected before persistence: ${tenderNumber || source.name}`,
+    details: safeJson({ source: source.name, sourceUrl: candidate.sourceUrl ?? null, title: candidate.title ?? null, reasons })
+  });
 }
 
 export async function closeExpiredTenders(): Promise<void> {
@@ -326,8 +539,8 @@ async function upsertTenderFromPayload(
   payload: RawTenderPayload,
   documentBudget: { remaining: number }
 ): Promise<
-  | { admitted: true; tenderId: string; created: boolean; duplicatesFound: number }
-  | { admitted: false }
+  | { admitted: true; tenderId: string; created: boolean; duplicatesFound: number; documentsDownloaded: number; documentsFailed: number }
+  | { admitted: false; documentsDownloaded: number; documentsFailed: number }
 > {
   const normalizedTitle = normalizeForSearch(payload.title);
   const canonicalTenderId = buildCanonicalTenderId({
@@ -374,7 +587,7 @@ async function upsertTenderFromPayload(
     const admissionErrors = validateNewTenderAdmission(payload);
     if (admissionErrors.length) {
       await createRejectedTenderQaTask(supabase, source, payload, admissionErrors);
-      return { admitted: false };
+      return { admitted: false, documentsDownloaded: 0, documentsFailed: 0 };
     }
 
     try {
@@ -385,7 +598,7 @@ async function upsertTenderFromPayload(
       await createRejectedTenderQaTask(supabase, source, payload, [
         error instanceof Error ? error.message : String(error)
       ]);
-      return { admitted: false };
+      return { admitted: false, documentsDownloaded: 0, documentsFailed: 0 };
     }
   }
 
@@ -449,7 +662,7 @@ async function upsertTenderFromPayload(
       await createRejectedTenderQaTask(supabase, source, payload, [
         `Validated document could not be persisted: ${error instanceof Error ? error.message : String(error)}`
       ]);
-      return { admitted: false };
+      return { admitted: false, documentsDownloaded: 0, documentsFailed: 0 };
     }
   }
 
@@ -493,7 +706,7 @@ async function upsertTenderFromPayload(
 
   await persistSectorMatches(supabase, tender.id, classification);
   await persistExtractedFields(supabase, tender.id, null, extractionFields);
-  await downloadAndParseDocuments(
+  const documentOutcome = await downloadAndParseDocuments(
     supabase,
     tender.id,
     payload,
@@ -518,7 +731,9 @@ async function upsertTenderFromPayload(
     admitted: true,
     tenderId: tender.id,
     created: !existing,
-    duplicatesFound: duplicateCount
+    duplicatesFound: duplicateCount,
+    documentsDownloaded: (preparedAdmissionDocument ? 1 : 0) + documentOutcome.downloaded,
+    documentsFailed: documentOutcome.failed
   };
 }
 
@@ -626,8 +841,10 @@ async function downloadAndParseDocuments(
   source: { id: string; adapter_key?: string | null; metadata?: Json | null },
   documentBudget: { remaining: number },
   persistedAdmissionDocumentUrl?: string
-): Promise<void> {
+): Promise<{ downloaded: number; failed: number }> {
   const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? "tender_document";
+  let downloaded = 0;
+  let failed = 0;
   for (const document of payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)) {
     if (persistedAdmissionDocumentUrl === document.url) continue;
     const { data: recentDocument, error: recentDocumentError } = await supabase
@@ -642,7 +859,7 @@ async function downloadAndParseDocuments(
     const refreshedWithinOneDay = recentDocument?.updated_at
       && Date.now() - new Date(recentDocument.updated_at).getTime() < 24 * 60 * 60 * 1000;
     if (recentDocument?.parser_status === "parsed" && refreshedWithinOneDay) continue;
-    if (documentBudget.remaining <= 0) return;
+    if (documentBudget.remaining <= 0) return { downloaded, failed };
     documentBudget.remaining -= 1;
 
     let prepared: PreparedTenderDocument;
@@ -657,10 +874,13 @@ async function downloadAndParseDocuments(
         title: "Tender document could not be fetched and validated",
         details: safeJson({ url: document.url, error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) })
       });
+      failed += 1;
       continue;
     }
     await persistPreparedTenderDocument(supabase, tenderId, payload, source, documentPrefix, prepared);
+    downloaded += 1;
   }
+  return { downloaded, failed };
 }
 
 async function persistPreparedTenderDocument(
@@ -1057,12 +1277,15 @@ async function storeRawSnapshot(
   const hash = sha256(body);
   const contentType = snapshot?.contentType ?? "application/json";
   const extension = snapshot?.extension ?? extensionFromContentType(contentType);
-  const storagePath = `${source.id}/${run.id}/${hash}.${extension}`;
-  await supabase.storage.from("tender-source-snapshots").upload(storagePath, body, {
+  // Content-addressed storage makes snapshots replay-safe and avoids storing the
+  // same source response repeatedly across scheduled runs.
+  const storagePath = `${source.id}/${hash}.${extension}`;
+  const { error: uploadError } = await supabase.storage.from("tender-source-snapshots").upload(storagePath, body, {
     contentType,
     upsert: true
   });
-  await supabase.from("raw_source_snapshots").upsert(
+  if (uploadError) throw uploadError;
+  const { error: snapshotError } = await supabase.from("raw_source_snapshots").upsert(
     {
       source_id: source.id,
       ingestion_run_id: run.id,
@@ -1073,6 +1296,7 @@ async function storeRawSnapshot(
     },
     { onConflict: "source_id,content_hash" }
   );
+  if (snapshotError) throw snapshotError;
 }
 
 function extensionFromContentType(contentType: string): string {
