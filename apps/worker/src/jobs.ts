@@ -24,6 +24,8 @@ import {
   PermanentSourceError,
   type ExtractedFieldResult,
   type Json,
+  type ParseDocumentResult,
+  type RawTenderDocument,
   type RawTenderPayload
 } from "@tenderlo/shared";
 import { createSourceContext, fetchBinary, getSourceAdapter, isKnownSourceDomain, normalizeSourceHostname } from "@tenderlo/sources";
@@ -41,7 +43,14 @@ export async function ingestAllDueSources(): Promise<void> {
   for (const source of (sources ?? []) as any[]) {
     const due = !source.last_run_at || Date.now() - new Date(source.last_run_at).getTime() >= source.scrape_frequency_minutes * 60_000;
     if (!due) continue;
-    const sourceTimeoutMs = ["federal-ppra-active", "sindh-sppra"].includes(source.adapter_key)
+    const sourceTimeoutMs = [
+      "federal-epads",
+      "federal-ppra-active",
+      "punjab-ppra",
+      "sindh-sppra",
+      "kp-ppra-active",
+      "balochistan-bppra"
+    ].includes(source.adapter_key)
       ? 60 * 60_000 // Large EPMS portals require polite API/detail/document crawls plus many idempotent DB writes.
       : SOURCE_TIMEOUT_MS;
     try {
@@ -94,6 +103,7 @@ export async function ingestSource(sourceId: string): Promise<void> {
     for (const payload of payloads) {
       await storeRawSnapshot(supabase, source as any, run as any, payload);
       const outcome = await upsertTenderFromPayload(supabase, source as any, payload, documentBudget);
+      if (!outcome.admitted) continue;
       if (outcome.created) created += 1;
       else updated += 1;
       if (outcome.duplicatesFound) duplicates += outcome.duplicatesFound;
@@ -219,7 +229,10 @@ async function upsertTenderFromPayload(
   source: { id: string; source_type: string; name: string; adapter_key?: string | null; metadata?: Json | null },
   payload: RawTenderPayload,
   documentBudget: { remaining: number }
-): Promise<{ tenderId: string; created: boolean; duplicatesFound: number }> {
+): Promise<
+  | { admitted: true; tenderId: string; created: boolean; duplicatesFound: number }
+  | { admitted: false }
+> {
   const normalizedTitle = normalizeForSearch(payload.title);
   const canonicalTenderId = buildCanonicalTenderId({
     sourceId: source.id,
@@ -256,6 +269,26 @@ async function upsertTenderFromPayload(
     existing = sourceUrlExisting;
   }
   let tender = existing;
+  let preparedAdmissionDocument: PreparedTenderDocument | undefined;
+
+  if (!existing) {
+    const admissionErrors = validateNewTenderAdmission(payload);
+    if (admissionErrors.length) {
+      await createRejectedTenderQaTask(supabase, source, payload, admissionErrors);
+      return { admitted: false };
+    }
+
+    try {
+      preparedAdmissionDocument = await prepareFirstAvailableTenderDocument(
+        payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)
+      );
+    } catch (error) {
+      await createRejectedTenderQaTask(supabase, source, payload, [
+        error instanceof Error ? error.message : String(error)
+      ]);
+      return { admitted: false };
+    }
+  }
 
   if (!existing?.is_human_verified) {
     const values = {
@@ -290,6 +323,36 @@ async function upsertTenderFromPayload(
   }
 
   if (!tender) throw new Error("Tender upsert did not return a record.");
+
+  if (!existing && preparedAdmissionDocument) {
+    const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix"))
+      ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix"))
+      ?? "tender_document";
+    try {
+      await persistPreparedTenderDocument(
+        supabase,
+        tender.id,
+        payload,
+        source,
+        documentPrefix,
+        preparedAdmissionDocument
+      );
+    } catch (error) {
+      const storagePath = buildTenderDocumentStoragePath({
+        adapterKey: source.adapter_key ?? "unknown-source",
+        documentPrefix,
+        tenderId: tender.id,
+        hash: preparedAdmissionDocument.hash,
+        filename: preparedAdmissionDocument.filename
+      });
+      await supabase.storage.from("tender-documents").remove([storagePath]);
+      await supabase.from("tenders").delete().eq("id", tender.id);
+      await createRejectedTenderQaTask(supabase, source, payload, [
+        `Validated document could not be persisted: ${error instanceof Error ? error.message : String(error)}`
+      ]);
+      return { admitted: false };
+    }
+  }
 
   const sourceProvenance = buildSourceProvenance(source, payload);
   await supabase.from("tender_source_links").upsert(
@@ -331,9 +394,16 @@ async function upsertTenderFromPayload(
 
   await persistSectorMatches(supabase, tender.id, classification);
   await persistExtractedFields(supabase, tender.id, null, extractionFields);
-  await downloadAndParseDocuments(supabase, tender.id, payload, source, documentBudget);
+  await downloadAndParseDocuments(
+    supabase,
+    tender.id,
+    payload,
+    source,
+    documentBudget,
+    preparedAdmissionDocument?.document.url
+  );
 
-  if (primarySector === "uncategorized") {
+  if (primarySector === "uncategorized" && procurementCategory.trim().toLowerCase() === "works") {
     await createQaTask(supabase, {
       tenderId: tender.id,
       sourceId: source.id,
@@ -346,9 +416,104 @@ async function upsertTenderFromPayload(
 
   const duplicateCount = await detectAndMergeDuplicates(supabase, tender);
   return {
+    admitted: true,
     tenderId: tender.id,
     created: !existing,
     duplicatesFound: duplicateCount
+  };
+}
+
+export function validateNewTenderAdmission(payload: RawTenderPayload, now = new Date()): string[] {
+  const errors: string[] = [];
+  if (!payload.title.trim()) errors.push("Tender title is missing.");
+  if (!payload.tenderNumber?.trim()) errors.push("Tender number is missing.");
+  if (!payload.department?.trim()) errors.push("Procuring department is missing.");
+  if (!payload.sourceUrl.trim()) errors.push("Source URL is missing.");
+  if (!payload.advertisementDate || Number.isNaN(Date.parse(payload.advertisementDate))) {
+    errors.push("Advertisement date is missing or invalid.");
+  }
+  if (!payload.closingDate || Number.isNaN(Date.parse(payload.closingDate))) {
+    errors.push("Closing date is missing or invalid.");
+  } else if (Date.parse(payload.closingDate) <= now.getTime()) {
+    errors.push("Tender closing date has already passed.");
+  }
+  if (!payload.documents.length) errors.push("No primary tender document was advertised by the source.");
+  return errors;
+}
+
+type PreparedTenderDocument = {
+  document: RawTenderDocument;
+  buffer: Buffer;
+  contentType: string;
+  filename: string;
+  hash: string;
+  parsed: ParseDocumentResult;
+};
+
+async function createRejectedTenderQaTask(
+  supabase: DatabaseClient,
+  source: { id: string; name: string },
+  payload: RawTenderPayload,
+  reasons: string[]
+): Promise<void> {
+  await createQaTask(supabase, {
+    sourceId: source.id,
+    taskType: "parser_failure",
+    priority: "high",
+    title: `Tender rejected before persistence: ${payload.tenderNumber?.trim() || sha256(Buffer.from(payload.sourceUrl)).slice(0, 12)}`,
+    details: safeJson({
+      source: source.name,
+      sourceUrl: payload.sourceUrl,
+      tenderNumber: payload.tenderNumber ?? null,
+      title: payload.title,
+      reasons
+    })
+  });
+}
+
+async function prepareFirstAvailableTenderDocument(documents: RawTenderDocument[]): Promise<PreparedTenderDocument> {
+  const failures: string[] = [];
+  for (const document of documents) {
+    try {
+      return await prepareTenderDocument(document);
+    } catch (error) {
+      failures.push(`${document.url}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`No advertised tender document could be fetched and validated. ${failures.join(" | ")}`);
+}
+
+async function prepareTenderDocument(document: RawTenderDocument): Promise<PreparedTenderDocument> {
+  let fetched: Awaited<ReturnType<typeof fetchBinary>>;
+  try {
+    fetched = await fetchBinary(document.url, undefined, document.downloadRequest);
+  } catch (error) {
+    throw new Error(`Document fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!fetched.ok) throw new Error(`Document download returned HTTP ${fetched.status}.`);
+
+  const filename = fetched.filename ?? document.filename ?? (basename(new URL(document.url).pathname) || "tender-document");
+  const validationError = validateDownloadedDocument({
+    buffer: fetched.buffer,
+    contentType: fetched.contentType,
+    filename
+  });
+  if (validationError) throw new Error(validationError);
+
+  const contentType = fetched.contentType || document.mimeType || "application/octet-stream";
+  const parsed = await parseDocument({
+    buffer: fetched.buffer,
+    mimeType: contentType,
+    filename,
+    sourceUrl: document.url
+  });
+  return {
+    document,
+    buffer: fetched.buffer,
+    contentType,
+    filename,
+    hash: sha256(fetched.buffer),
+    parsed
   };
 }
 
@@ -356,12 +521,13 @@ async function downloadAndParseDocuments(
   supabase: DatabaseClient,
   tenderId: string,
   payload: RawTenderPayload,
-  source: { adapter_key?: string | null; metadata?: Json | null },
-  documentBudget: { remaining: number }
+  source: { id: string; adapter_key?: string | null; metadata?: Json | null },
+  documentBudget: { remaining: number },
+  persistedAdmissionDocumentUrl?: string
 ): Promise<void> {
-  const sourceGroup = metadataString(payload.sourceGroup) ?? metadataString(sourceMetadataValue(source.metadata, "sourceGroup"));
   const documentPrefix = metadataString(sourceMetadataValue(payload.sourceMetadata, "documentPrefix")) ?? metadataString(sourceMetadataValue(source.metadata, "documentPrefix")) ?? "tender_document";
   for (const document of payload.documents.slice(0, sourceRuntimeConfig.maxDocumentsPerTender)) {
+    if (persistedAdmissionDocumentUrl === document.url) continue;
     const { data: recentDocument, error: recentDocumentError } = await supabase
       .from("tender_documents")
       .select("id, parser_status, updated_at")
@@ -377,141 +543,123 @@ async function downloadAndParseDocuments(
     if (documentBudget.remaining <= 0) return;
     documentBudget.remaining -= 1;
 
-    let fetched: Awaited<ReturnType<typeof fetchBinary>>;
+    let prepared: PreparedTenderDocument;
     try {
-      fetched = await fetchBinary(document.url, undefined, document.downloadRequest);
+      prepared = await prepareTenderDocument(document);
     } catch (fetchErr) {
       await createQaTask(supabase, {
         tenderId,
+        sourceId: source.id,
         taskType: "parser_failure",
         priority: "medium",
-        title: "Tender document fetch threw an exception",
+        title: "Tender document could not be fetched and validated",
         details: safeJson({ url: document.url, error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) })
       });
       continue;
     }
-    if (!fetched.ok) {
-      await createQaTask(supabase, {
-        tenderId,
-        taskType: "parser_failure",
-        priority: "medium",
-        title: "Tender document could not be downloaded",
-        details: safeJson({ url: document.url, status: fetched.status })
-      });
-      continue;
-    }
+    await persistPreparedTenderDocument(supabase, tenderId, payload, source, documentPrefix, prepared);
+  }
+}
 
-    const documentValidationError = validateDownloadedDocument({
-      buffer: fetched.buffer,
-      contentType: fetched.contentType,
-      filename: fetched.filename ?? document.filename
-    });
-    if (documentValidationError) {
-      await createQaTask(supabase, {
-        tenderId,
-        taskType: "parser_failure",
-        priority: "high",
-        title: "Tender document download failed file validation",
-        details: safeJson({
-          url: document.url,
-          filename: document.filename ?? null,
-          content_type: fetched.contentType,
-          error: documentValidationError
-        })
-      });
-      continue;
-    }
+async function persistPreparedTenderDocument(
+  supabase: DatabaseClient,
+  tenderId: string,
+  payload: RawTenderPayload,
+  source: { id: string; adapter_key?: string | null },
+  documentPrefix: string,
+  prepared: PreparedTenderDocument
+): Promise<void> {
+  const storagePath = buildTenderDocumentStoragePath({
+    adapterKey: source.adapter_key ?? "unknown-source",
+    documentPrefix,
+    tenderId,
+    hash: prepared.hash,
+    filename: prepared.filename
+  });
+  const { error: uploadError } = await supabase.storage.from("tender-documents").upload(storagePath, prepared.buffer, {
+    contentType: prepared.contentType,
+    upsert: true
+  });
+  if (uploadError) throw uploadError;
 
-    const hash = sha256(fetched.buffer);
-    const filename = fetched.filename ?? document.filename ?? (basename(new URL(document.url).pathname) || "tender-document");
-    const storagePath = buildTenderDocumentStoragePath({
-      adapterKey: source.adapter_key ?? "unknown-source",
-      documentPrefix,
+  const { data: tenderDocument, error } = await supabase
+    .from("tender_documents")
+    .upsert(
+      {
+        tender_id: tenderId,
+        source_url: prepared.document.url,
+        storage_path: storagePath,
+        original_filename: prepared.filename,
+        mime_type: prepared.contentType,
+        content_hash: prepared.hash,
+        parser_status: "pending",
+        ocr_status: "not_needed"
+      },
+      { onConflict: "tender_id,content_hash" }
+    )
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  await supabase
+    .from("tender_documents")
+    .update({
+      page_count: prepared.parsed.pageCount,
+      parser_status: prepared.parsed.parserStatus,
+      ocr_status: prepared.parsed.ocrStatus
+    })
+    .eq("id", tenderDocument.id);
+
+  if (prepared.parsed.parserStatus === "failed") {
+    await createQaTask(supabase, {
       tenderId,
-      hash,
-      filename
-    });
-    await supabase.storage.from("tender-documents").upload(storagePath, fetched.buffer, {
-      contentType: fetched.contentType || document.mimeType || "application/octet-stream",
-      upsert: true
-    });
-
-    const { data: tenderDocument, error } = await supabase
-      .from("tender_documents")
-      .upsert(
-        {
-          tender_id: tenderId,
-          source_url: document.url,
-          storage_path: storagePath,
-          original_filename: filename,
-          mime_type: fetched.contentType || document.mimeType || "application/octet-stream",
-          content_hash: hash,
-          parser_status: "pending",
-          ocr_status: "not_needed"
-        },
-        { onConflict: "tender_id,content_hash" }
-      )
-      .select("*")
-      .single();
-    if (error) throw error;
-
-    const parsed = await parseDocument({
-      buffer: fetched.buffer,
-      mimeType: fetched.contentType || document.mimeType || "application/octet-stream",
-      filename,
-      sourceUrl: document.url
-    });
-
-    await supabase
-      .from("tender_documents")
-      .update({
-        page_count: parsed.pageCount,
-        parser_status: parsed.parserStatus,
-        ocr_status: parsed.ocrStatus
+      sourceId: source.id,
+      taskType: "parser_failure",
+      priority: "high",
+      title: "Tender document parsing failed",
+      details: safeJson({
+        document_id: tenderDocument.id,
+        url: prepared.document.url,
+        error: prepared.parsed.errorMessage
       })
-      .eq("id", tenderDocument.id);
+    });
+    return;
+  }
 
-    if (parsed.parserStatus === "failed") {
-      await createQaTask(supabase, {
-        tenderId,
-        taskType: "parser_failure",
-        priority: "high",
-        title: "Tender document parsing failed",
-        details: safeJson({ document_id: tenderDocument.id, url: document.url, error: parsed.errorMessage })
-      });
-      continue;
-    }
-
-    for (const page of parsed.pages) {
-      await supabase.from("parsed_document_text").upsert(
-        {
-          tender_document_id: tenderDocument.id,
-          page_number: page.pageNumber,
-          text: page.text,
-          extraction_method: page.extractionMethod,
-          confidence_score: page.confidenceScore
-        },
-        { onConflict: "tender_document_id,page_number,extraction_method" }
-      );
-    }
-
-    const documentText = mergeParsedPages(parsed.pages);
-    const documentFields = normalizeDocumentFieldsForSource(
-      extractTenderFields(documentText),
-      source.adapter_key,
-      documentText
+  for (const page of prepared.parsed.pages) {
+    await supabase.from("parsed_document_text").upsert(
+      {
+        tender_document_id: tenderDocument.id,
+        page_number: page.pageNumber,
+        text: page.text,
+        extraction_method: page.extractionMethod,
+        confidence_score: page.confidenceScore
+      },
+      { onConflict: "tender_document_id,page_number,extraction_method" }
     );
-    await persistExtractedFields(supabase, tenderId, tenderDocument.id, documentFields);
-    await promoteDocumentFieldsToTender(supabase, tenderId, documentFields);
-    if (payload.newspaperName && parsed.ocrStatus === "completed") {
-      await createQaTask(supabase, {
-        tenderId,
-        taskType: "manual_verification",
-        priority: "medium",
-        title: "OCR newspaper tender notice needs verification",
-        details: safeJson({ document_id: tenderDocument.id, newspaper: payload.newspaperName, confidence: parsed.pages[0]?.confidenceScore ?? null })
-      });
-    }
+  }
+
+  const documentText = mergeParsedPages(prepared.parsed.pages);
+  const documentFields = normalizeDocumentFieldsForSource(
+    extractTenderFields(documentText),
+    source.adapter_key,
+    documentText
+  );
+  await persistExtractedFields(supabase, tenderId, tenderDocument.id, documentFields);
+  await promoteDocumentFieldsToTender(supabase, tenderId, documentFields);
+  if (payload.newspaperName && prepared.parsed.ocrStatus === "completed") {
+    await createQaTask(supabase, {
+      tenderId,
+      sourceId: source.id,
+      taskType: "manual_verification",
+      priority: "medium",
+      title: "OCR newspaper tender notice needs verification",
+      details: safeJson({
+        document_id: tenderDocument.id,
+        newspaper: payload.newspaperName,
+        confidence: prepared.parsed.pages[0]?.confidenceScore ?? null
+      })
+    });
   }
 }
 

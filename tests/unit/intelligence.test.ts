@@ -67,6 +67,9 @@ describe("deterministic tender intelligence", () => {
     const matches = classifyTender({ title: "Road rehabilitation and bridge works in Punjab", body: "civil works" });
     expect(matches[0]?.sector).toBe("roads");
     expect(matches[0]?.isPrimary).toBe(true);
+    expect(classifyTender({ title: "Laying of tuff tiles in village streets" })[0]?.sector).toBe("roads");
+    expect(classifyTender({ title: "Protection bund at Allahbad Mach" })[0]?.sector).toBe("water");
+    expect(classifyTender({ title: "Rehabilitation and lining of flood nallah" })[0]?.sector).toBe("water");
   });
 
   it("scores high-confidence duplicates", () => {

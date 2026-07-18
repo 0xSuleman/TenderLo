@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RawTenderPayload } from "@tenderlo/shared";
-import { buildSourceProvenance, buildTenderDocumentStoragePath, buildTenderFieldPromotion, validateDownloadedDocument } from "../../apps/worker/src/jobs";
+import {
+  buildSourceProvenance,
+  buildTenderDocumentStoragePath,
+  buildTenderFieldPromotion,
+  validateDownloadedDocument,
+  validateNewTenderAdmission
+} from "../../apps/worker/src/jobs";
 
 describe("worker tender persistence helpers", () => {
   it("builds deterministic source-prefixed private document storage paths", () => {
@@ -74,5 +80,28 @@ describe("worker tender persistence helpers", () => {
       contentType: "text/html",
       filename: "bidding-document.pdf"
     })).toMatch(/does not have a PDF signature/i);
+  });
+
+  it("admits only current, core-complete tenders that advertise a document", () => {
+    const currentTender: RawTenderPayload = {
+      sourceUrl: "https://epads.gov.pk/opportunities/federal/procurements/53111",
+      title: "Procurement of audit services",
+      tenderNumber: "P53111",
+      department: "Peshawar Electric Supply Company",
+      advertisementDate: "2026-07-17T07:40:00+05:00",
+      closingDate: "2026-07-20T10:00:00+05:00",
+      documents: [{ url: "https://epads.gov.pk/api/bidding-document/53111", filename: "bidding-document.pdf" }],
+      raw: {}
+    };
+
+    expect(validateNewTenderAdmission(currentTender, new Date("2026-07-18T00:00:00+05:00"))).toEqual([]);
+    expect(validateNewTenderAdmission(
+      { ...currentTender, department: undefined, closingDate: "2026-07-17T10:00:00+05:00", documents: [] },
+      new Date("2026-07-18T00:00:00+05:00")
+    )).toEqual(expect.arrayContaining([
+      "Procuring department is missing.",
+      "Tender closing date has already passed.",
+      "No primary tender document was advertised by the source."
+    ]));
   });
 });

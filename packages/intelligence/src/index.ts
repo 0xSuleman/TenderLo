@@ -45,11 +45,11 @@ const monthMap: Record<string, number> = {
 };
 
 const sectorKeywords: Record<ContractorSector, string[]> = {
-  construction: ["construction", "civil work", "civil works", "civil contractor"],
-  roads: ["road", "roads", "carpet", "pavement", "asphalt", "street"],
+  construction: ["construction", "const of", "civil work", "civil works", "civil contractor"],
+  roads: ["road", "roads", "carpet", "pavement", "asphalt", "street", "tuff tile", "tuff tiles", "black top", "b/t road"],
   highways: ["highway", "motorway", "nh", "nha", "interchange"],
   bridges: ["bridge", "culvert", "flyover", "underpass"],
-  buildings: ["building", "school", "hospital", "office block", "residential", "renovation"],
+  buildings: ["building", "school", "hospital", "office block", "residential", "renovation", "roof screeding", "sports complex"],
   MEP: ["mep", "electro mechanical", "electromechanical"],
   electrical: ["electrical", "wiring", "transformer", "substation", "lt", "ht", "feeder"],
   power: ["power", "solar", "grid", "transmission", "distribution", "generator"],
@@ -57,9 +57,9 @@ const sectorKeywords: Record<ContractorSector, string[]> = {
   HVAC: ["hvac", "air conditioning", "chiller", "ventilation", "cooling"],
   plumbing: ["plumbing", "pipe", "piping", "water supply line", "sanitary"],
   fire_safety: ["fire safety", "fire fighting", "fire alarm", "sprinkler"],
-  water: ["water", "tube well", "filtration", "drinking water", "water supply"],
+  water: ["water", "tube well", "filtration", "drinking water", "water supply", "protection bund", "protection wall", "retaining wall", "flood protection", "flood channel", "nallah", "channel lining", "lining of channel", "karez", "embankment"],
   sewerage: ["sewerage", "sewer", "drainage", "storm water"],
-  sanitation: ["sanitation", "solid waste", "wastewater", "cleaning"],
+  sanitation: ["sanitation", "solid waste", "wastewater", "cleaning", "cleanliness", "janitorial"],
   telecom_infrastructure: ["telecom", "fiber", "fibre", "tower", "ofc", "low voltage"],
   IT_infrastructure: ["it infrastructure", "network", "server", "data center", "lan", "cctv"],
   oil_and_gas_works: ["oil", "gas", "pipeline", "sngpl", "ssgc", "petroleum"],

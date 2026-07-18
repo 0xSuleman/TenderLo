@@ -1291,6 +1291,7 @@ const bppraPortalUrl = "https://bpptwo.vdc.services:5451/Tenders";
 const bppraRecordsPerPage = 100;
 const bppraAdvertisementLookbackDays = 400;
 const bppraMaxApiPages = 300;
+const bppraPageConcurrency = 3;
 
 export class BalochistanBppraAdapter implements SourceAdapter {
   readonly respectsRobotsTxt = true;
@@ -1315,16 +1316,21 @@ export class BalochistanBppraAdapter implements SourceAdapter {
       throw new SourceFetchError(`Balochistan PPRA reported an unsafe page count (${pageCount}).`);
     }
 
-    const remainingPages = await Promise.all(Array.from({ length: pageCount - 1 }, async (_, index) => {
-      const page = index + 2;
-      await sleep(sourceRuntimeConfig.politeRequestDelayMs * (index + 1));
-      const pageUrl = bppraApiPageUrl(page, dateRange);
-      const response = await fetchBppraJson<BppraTenderResponse>(pageUrl, context.userAgent);
-      if (response.status !== true || !Array.isArray(response.tenders)) {
-        throw new SourceFetchError(`Balochistan PPRA returned an invalid response for page ${page}.`);
-      }
-      return response.tenders;
-    }));
+    const remainingPages: BppraTenderRecord[][] = [];
+    const pageNumbers = Array.from({ length: pageCount - 1 }, (_, index) => index + 2);
+    for (let offset = 0; offset < pageNumbers.length; offset += bppraPageConcurrency) {
+      if (offset > 0) await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      const batch = pageNumbers.slice(offset, offset + bppraPageConcurrency);
+      const batchRecords = await Promise.all(batch.map(async (page) => {
+        const pageUrl = bppraApiPageUrl(page, dateRange);
+        const response = await fetchBppraJson<BppraTenderResponse>(pageUrl, context.userAgent);
+        if (response.status !== true || !Array.isArray(response.tenders)) {
+          throw new SourceFetchError(`Balochistan PPRA returned an invalid response for page ${page}.`);
+        }
+        return response.tenders;
+      }));
+      remainingPages.push(...batchRecords);
+    }
 
     const records = [firstPage.tenders, ...remainingPages].flat();
     const unique = new Map<number, BppraTenderRecord>();

@@ -16,7 +16,7 @@ export function PageTransition({ children }: { children: ReactNode }): JSX.Eleme
         key={pathname}
         animate="visible"
         exit="exit"
-        initial="hidden"
+        initial={false}
         transition={defaultMotionTransition}
         variants={fadeIn}
       >
@@ -30,7 +30,7 @@ export function MotionList({ children, className }: { children: ReactNode; class
   const reduceMotion = useReducedMotion();
   if (reduceMotion) return <div className={className}>{children}</div>;
   return (
-    <motion.div animate="visible" className={className} initial="hidden" variants={staggerContainer}>
+    <motion.div animate="visible" className={className} initial={false} variants={staggerContainer}>
       {children}
     </motion.div>
   );
@@ -52,7 +52,7 @@ export function SectionReveal({ children, className }: { children: ReactNode; cl
   return (
     <motion.div
       className={className}
-      initial="hidden"
+      initial={false}
       transition={defaultMotionTransition}
       variants={slideUp}
       viewport={{ once: true, margin: "-80px" }}
@@ -65,13 +65,14 @@ export function SectionReveal({ children, className }: { children: ReactNode; cl
 
 export function AnimatedNumber({ value, suffix = "", prefix = "", className }: { value: number; suffix?: string; prefix?: string; className?: string }): JSX.Element {
   const reduceMotion = useReducedMotion();
-  const [displayValue, setDisplayValue] = useState(reduceMotion ? value : 0);
+  const [displayValue, setDisplayValue] = useState(value);
 
   useEffect(() => {
     if (reduceMotion) {
       setDisplayValue(value);
       return;
     }
+    setDisplayValue(0);
     const duration = 720;
     const startedAt = performance.now();
     let frame = 0;
