@@ -12,7 +12,7 @@ export default function HomePage(): JSX.Element {
       <main>
         {/* Hero Section */}
         <section className="relative overflow-hidden pt-20 pb-16">
-          <div className="container text-center flex flex-col items-center">
+          <div className="container text-center flex flex-col items-center relative z-10">
             <Badge tone="good" className="mb-4">Live In Pakistan</Badge>
             <h1 className="font-display text-5xl md:text-7xl font-extrabold tracking-tight text-slate-900 max-w-4xl leading-[1.08] mb-6">
               Find the right tenders.<br />Win more contracts.

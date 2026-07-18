@@ -25,28 +25,33 @@ export function MarketingNav(): JSX.Element {
     { href: "/login", label: "Sign in" }
   ];
   return (
-    <nav className="sticky top-0 z-40 mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 backdrop-blur-xl">
-      <a className="rounded-md px-2 py-1 font-display text-xl font-bold tracking-tight text-foreground transition hover:bg-slate-100" href="/">
-        TenderLo
-      </a>
-      <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-1 text-sm font-semibold sm:w-auto sm:justify-end sm:gap-3">
-        {links.map((link) => (
-          <a
-            key={link.href}
-            className={cn(
-              "rounded-md px-2 py-2 text-muted-foreground transition duration-200 hover:bg-slate-100 hover:text-foreground",
-              pathname === link.href ? "bg-slate-100 text-foreground shadow-sm" : null
-            )}
-            href={link.href}
-          >
-            {link.label}
-          </a>
-        ))}
-        <a className="rounded-md bg-primary px-3 py-2 font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition duration-150 active:scale-[0.98]" href="/signup">
-          Sign up
+    <header className="sticky top-0 z-40 w-full border-b border-[#EAE7DF]/60 bg-[#FAF9F5] py-5">
+      <nav className="mx-auto flex max-w-6xl items-center justify-between px-4 sm:px-6">
+        {/* Left Logo */}
+        <a className="font-display text-xl font-extrabold tracking-tight text-slate-800" href="/">
+          TenderLo
         </a>
-      </div>
-    </nav>
+
+        {/* Right Navigation Links */}
+        <div className="flex items-center gap-8 text-[13px] font-medium tracking-wider text-slate-600 uppercase">
+          {links.map((link) => {
+            const active = pathname === link.href;
+            return (
+              <a
+                key={link.href}
+                className={cn(
+                  "relative pb-1 transition-colors duration-150 hover:text-slate-900 normal-case font-semibold",
+                  active ? "text-slate-950 border-b-[1.5px] border-slate-900" : "text-slate-600"
+                )}
+                href={link.href}
+              >
+                {link.label}
+              </a>
+            );
+          })}
+        </div>
+      </nav>
+    </header>
   );
 }
 

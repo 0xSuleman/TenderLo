@@ -3,6 +3,7 @@ import { tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 import { AppShell } from "@/components/nav";
 import { MotionItem, MotionList, ScoreRing } from "@/components/motion";
 import { Badge, Button, Card, EmptyState, Field, Input, LinkButton, PageHeader, Select } from "@/components/ui";
+import { TenderListInteractive } from "@/components/TenderListInteractive";
 import { getPageContext } from "@/lib/page-context";
 import { formatDate } from "@/lib/utils";
 import { hasActiveTenderPlan, listTenderFilterOptions, searchTenders, type TenderFilterOptions, type TenderSearchResult } from "@/lib/tender-search";
@@ -183,13 +184,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
                 title="No tenders match these filters"
               />
             ) : null}
-            <MotionList className="grid gap-4">
-              {result.data.map((tender) => (
-                <MotionItem key={String(tender.id)}>
-                  <TenderResultCard tender={tender} fullAccess={result.meta.planAccess !== "free"} />
-                </MotionItem>
-              ))}
-            </MotionList>
+            <TenderListInteractive tenders={result.data} fullAccess={result.meta.planAccess !== "free"} />
           </div>
 
           {result.pagination.totalPages > 1 ? (
