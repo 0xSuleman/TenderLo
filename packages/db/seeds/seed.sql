@@ -185,6 +185,12 @@ values
     'documentPrefix', 'tender_ppra2',
     'knownSourceDomains', array['ppra.org.pk','epms.ppra.gov.pk','epads.gov.pk','vendors.epads.gov.pk','eprocure.gov.pk','procure.gov.pk','pac.org.pk','piac.com.pk','sngpl.com.pk','uog.edu.pk','nbp.com.pk','pof.gov.pk','statelife.com.pk','fesco.com.pk','nha.gov.pk','ebidding.pof.gov.pk','pakpost.gov.pk','pmdc.gov.pk','pitac.gov.pk']
   )),
+  ('Sui Southern Gas Company Active Tenders', 'https://www.ssgc.com.pk/web/?page_id=111492', 'department', 'Pakistan', 'ssgc-active-tenders', 360, 'active', jsonb_build_object(
+    'sourceGroup', 'ssgc',
+    'portalFamily', 'ssgc',
+    'documentPrefix', 'tender_SSGC',
+    'knownSourceDomains', array['ssgc.com.pk','www.ssgc.com.pk']
+  )),
   ('Punjab PPRA Public Procurement', 'https://eproc.punjab.gov.pk/Admin_Tender_Search.aspx', 'provincial', 'Punjab', 'punjab-ppra', 15, 'active', jsonb_build_object(
     'sourceGroup', 'punjab_ppra',
     'portalFamily', 'punjab_ppra',

@@ -90,6 +90,7 @@ type BuildPayloadInput = {
   closingDate?: string | undefined;
   city?: string | undefined;
   estimatedValue?: number | undefined;
+  documentFee?: number | undefined;
   description: string;
   documents: RawTenderPayload["documents"];
   rawHtml: string;
@@ -2365,9 +2366,155 @@ class ExpressEpaperAdapter extends OcrNewspaperAdapter {
   }
 }
 
+const ssgcActiveTendersProfile: SourceProfile = {
+  key: "ssgc-active-tenders",
+  name: "Sui Southern Gas Company Active Tenders",
+  sourceType: "department",
+  region: "Pakistan",
+  sourceGroup: "ssgc",
+  documentPrefix: "tender_SSGC",
+  portalFamily: "ssgc",
+  knownSourceDomains: ["ssgc.com.pk", "www.ssgc.com.pk"],
+  listing: { rowSelector: "td.record_row_blue_1_c" },
+  defaultSubmissionMethod: "As stated in the SSGC tender document"
+};
+
+/** Parses SSGC's public three-row Active Tenders table. */
+export function parseSsgcActiveTendersListing(html: string, baseUrl: string): RawTenderPayload[] {
+  const $ = cheerio.load(html);
+  const payloads: RawTenderPayload[] = [];
+
+  $("td.record_row_blue_1_c").each((_index, serialCell) => {
+    const identityRow = $(serialCell).closest("tr");
+    const identityCells = identityRow.children("td");
+    const referenceLink = identityCells.eq(1).find("a[href]").first();
+    const tenderNumber = cleanOptional(referenceLink.text());
+    const sourceUrl = ssgcAbsoluteUrl(referenceLink.attr("href"), baseUrl);
+    const closingDate = parseFederalPpraDate(identityCells.eq(2).text().trim() + " " + identityCells.eq(3).text().trim(), true);
+    const documentFee = parseMoney(identityCells.eq(4).text());
+    const descriptionRow = identityRow.nextAll("tr").filter((_rowIndex, row) => $(row).find("td.record_row_blue_2_l").length > 0).first();
+    const documentRow = descriptionRow.nextAll("tr").filter((_rowIndex, row) => /Download\s+Tender\s+Document/i.test($(row).text())).first();
+    const description = cleanOptional(descriptionRow.find("td.record_row_blue_2_l").text());
+    const documentPageUrl = ssgcAbsoluteUrl(documentRow.find("a[href]").filter((_linkIndex, link) => /Download\s+Tender\s+Document/i.test($(link).text())).first().attr("href"), baseUrl);
+    const procurementMethod = cleanOptional(documentRow.find("td").first().text());
+
+    if (!tenderNumber || !sourceUrl || !closingDate || !description || !documentPageUrl) return;
+    const payload = buildPayload(ssgcActiveTendersProfile, {
+      sourceUrl,
+      title: description,
+      tenderNumber,
+      department: "Sui Southern Gas Company Limited",
+      closingDate,
+      description,
+      documentFee,
+      documents: [],
+      procurementMethod,
+      websiteUrl: baseUrl,
+      rawHtml: identityRow.add(descriptionRow).add(documentRow).toString()
+    });
+    payload.sourceMetadata = safeJson({
+      ...(payload.sourceMetadata as Record<string, Json>),
+      ssgcDocumentPageUrl: documentPageUrl,
+      advertisementDateUnavailable: "SSGC public active-tender listing does not publish an advertisement date."
+    });
+    payloads.push(payload);
+  });
+  return payloads;
+}
+
+export class SsgcActiveTendersAdapter implements SourceAdapter {
+  readonly respectsRobotsTxt = true;
+  readonly key = ssgcActiveTendersProfile.key;
+  readonly name = ssgcActiveTendersProfile.name;
+  readonly sourceType: SourceType = ssgcActiveTendersProfile.sourceType;
+
+  async fetchTenders(context: SourceAdapterContext): Promise<RawTenderPayload[]> {
+    const listing = await fetchPublicText(context.baseUrl, context.userAgent);
+    const candidates = parseSsgcActiveTendersListing(listing.text, context.baseUrl);
+    if (!candidates.length) throw new SourceFetchError("SSGC Active Tenders returned no parseable tender rows.");
+    const payloads: RawTenderPayload[] = [];
+    const lookupFailures: string[] = [];
+    // Consent pages are independent public pages. Use small bounded batches so
+    // SSGC is treated politely without making one slow page block every tender.
+    const candidatesToResolve = candidates.slice(0, sourceRuntimeConfig.maxLinksPerSourceRun);
+    for (let offset = 0; offset < candidatesToResolve.length; offset += 3) {
+      if (offset > 0) await sleep(sourceRuntimeConfig.politeRequestDelayMs);
+      const batch = candidatesToResolve.slice(offset, offset + 3);
+      const resolved = await Promise.all(batch.map(async (candidate) => {
+      const metadata = candidate.sourceMetadata as Record<string, Json>;
+      const documentPageUrl = metadataString(metadata.ssgcDocumentPageUrl);
+      if (!documentPageUrl) return { candidate, error: `${candidate.tenderNumber}: consent-page URL is missing` };
+      try {
+        const page = await fetchPublicText(documentPageUrl, context.userAgent);
+        const $ = cheerio.load(page.text);
+        const documents = $("a[href]").toArray()
+          .map((link) => ssgcAbsoluteUrl($(link).attr("href"), documentPageUrl))
+          .filter((url): url is string => Boolean(url && isSsgcTenderPdf(url)))
+          .map(ssgcCanonicalDocumentUrl)
+          .map((url) => ({
+            url,
+            filename: filenameFromUrl(url),
+            mimeType: "application/pdf",
+            sourceDocumentKey: `ssgc_${candidate.tenderNumber?.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_tender_document`
+          }))
+          .filter((document, index, documents) => documents.findIndex((candidateDocument) => candidateDocument.url === document.url) === index);
+        if (!documents.length) {
+          return { candidate, error: `${candidate.tenderNumber}: no official PDF link found` };
+        }
+        candidate.documents = documents;
+        candidate.rawSnapshot = { content: page.text, contentType: "text/html; charset=utf-8", extension: "html" };
+        return { candidate };
+      } catch (error) {
+        return { candidate, error: `${candidate.tenderNumber}: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      }));
+      for (const result of resolved) {
+        if (result.error) lookupFailures.push(result.error);
+        else payloads.push(result.candidate);
+      }
+    }
+    if (!payloads.length) throw new SourceFetchError(`SSGC did not expose a downloadable official PDF. ${lookupFailures.join(" | ")}`);
+    if (lookupFailures.length) {
+      for (const payload of payloads) {
+        payload.sourceMetadata = safeJson({ ...(payload.sourceMetadata as Record<string, Json>), documentLookupErrors: lookupFailures });
+      }
+    }
+    return payloads;
+  }
+}
+
+function isSsgcTenderPdf(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ["ssgc.com.pk", "www.ssgc.com.pk"].includes(parsed.hostname.toLowerCase())
+      && /\/web\/uploads\/tenders\/.+\.pdf$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function ssgcAbsoluteUrl(value: string | undefined, baseUrl: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+// The SSGC apex hostname is intermittently absent from public DNS while its
+// canonical www host serves the same official files. Do not pass this URL
+// through the generic hostname normalizer, which intentionally strips `www`.
+function ssgcCanonicalDocumentUrl(value: string): string {
+  const url = new URL(value);
+  url.hostname = "www.ssgc.com.pk";
+  return url.toString();
+}
+
 export const sourceAdapters: SourceAdapter[] = [
   new FederalEpadsAdapter(),
   new FederalPpraAdapter(),
+  new SsgcActiveTendersAdapter(),
   new PunjabPpraAdapter(),
   new SindhPpraAdapter(),
   new KpEprocureAdapter(),
@@ -2720,6 +2867,7 @@ function buildPayload(
     advertisementDate: input.advertisementDate,
     closingDate: input.closingDate,
     estimatedValue: input.estimatedValue,
+    documentFee: input.documentFee,
     procurementMethod: cleanOptional(input.procurementMethod) ?? profile.defaultProcurementMethod,
     submissionMethod: cleanOptional(input.submissionMethod) ?? profile.defaultSubmissionMethod,
     contactPerson: cleanOptional(input.contactPerson),

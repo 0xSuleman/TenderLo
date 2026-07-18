@@ -24,6 +24,7 @@ async function main(): Promise<void> {
   if (command === "ingest-source") {
     if (!argument) throw new Error("Usage: npm run worker -- ingest-source <source-id>");
     await ingestSource(argument);
+    await enforceMachineQualityGate();
     return;
   }
   if (command === "rebuild-recommendations") {

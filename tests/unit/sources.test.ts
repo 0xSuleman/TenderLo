@@ -1,11 +1,31 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PermanentSourceError } from "@tenderlo/shared";
-import { fetchBinary, getSourceAdapter, normalizeSourceUrl, parseBppraDeadline, parseFederalEpadsDeadline, parseFederalEpadsListing, parseFederalPpraDate, parseSindhPpraDateTime } from "@tenderlo/sources";
+import { fetchBinary, getSourceAdapter, normalizeSourceUrl, parseBppraDeadline, parseFederalEpadsDeadline, parseFederalEpadsListing, parseFederalPpraDate, parseSindhPpraDateTime, parseSsgcActiveTendersListing } from "@tenderlo/sources";
 
 describe("public source adapters", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("parses SSGC active rows with deadline, fee, and consent-page URL", () => {
+    const tenders = parseSsgcActiveTendersListing(`
+      <table><tbody>
+        <tr><td class="record_row_blue_1_c">1</td><td><a href="?page_id=112442&do=35607">SSGC/FP/PT/14384</a></td><td>Aug 13, 2026</td><td>10:00 AM</td><td>Rs. 3000/-</td></tr>
+        <tr><td class="record_row_blue_2_l" colspan="5">Pre-Coated Line Pipe</td></tr>
+        <tr><td>Open Competitive Bidding</td><td><a href="https://www.ssgc.com.pk/web/?page_id=115520&do=35607">Download Tender Document</a></td></tr>
+      </tbody></table>`, "https://www.ssgc.com.pk/web/?page_id=111492");
+
+    expect(tenders).toHaveLength(1);
+    expect(tenders[0]).toMatchObject({
+      tenderNumber: "SSGC/FP/PT/14384",
+      title: "Pre-Coated Line Pipe",
+      department: "Sui Southern Gas Company Limited",
+      documentFee: 3000,
+      closingDate: "2026-08-13T05:00:00.000Z",
+      documents: []
+    });
+    expect((tenders[0]?.sourceMetadata as { ssgcDocumentPageUrl?: string }).ssgcDocumentPageUrl).toContain("do=35607");
   });
 
   it("ingests current Sindh SPPRA API pages and resolves bidding and PA publication downloads", async () => {

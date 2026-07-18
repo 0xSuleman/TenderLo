@@ -487,7 +487,6 @@ export async function enforceMachineQualityGate(supabase = createServiceClient()
       || !tender.tender_number
       || !tender.department
       || !tender.source_url
-      || !tender.advertisement_date
       || !tender.closing_date
       || !tender.sector
       || tender.sector === "uncategorized")
@@ -835,7 +834,9 @@ export function validateNewTenderAdmission(payload: RawTenderPayload, now = new 
   if (!payload.tenderNumber?.trim()) errors.push("Tender number is missing.");
   if (!payload.department?.trim()) errors.push("Procuring department is missing.");
   if (!payload.sourceUrl.trim()) errors.push("Source URL is missing.");
-  if (!payload.advertisementDate || Number.isNaN(Date.parse(payload.advertisementDate))) {
+  const sourceMetadata = payload.sourceMetadata as Record<string, Json> | undefined;
+  const isSsgcPublicListing = sourceMetadata?.adapterKey === "ssgc-active-tenders";
+  if ((!payload.advertisementDate || Number.isNaN(Date.parse(payload.advertisementDate))) && !isSsgcPublicListing) {
     errors.push("Advertisement date is missing or invalid.");
   }
   if (!payload.closingDate || Number.isNaN(Date.parse(payload.closingDate))) {

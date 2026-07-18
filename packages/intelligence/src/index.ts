@@ -45,7 +45,7 @@ const monthMap: Record<string, number> = {
 };
 
 const sectorKeywords: Record<ContractorSector, string[]> = {
-  construction: ["construction", "const of", "civil work", "civil works", "civil contractor"],
+  construction: ["construction", "const of", "civil work", "civil works", "civil contractor", "cement", "concrete"],
   roads: ["road", "roads", "carpet", "pavement", "asphalt", "street", "tuff tile", "tuff tiles", "black top", "b/t road"],
   highways: ["highway", "motorway", "nh", "nha", "interchange"],
   bridges: ["bridge", "culvert", "flyover", "underpass"],

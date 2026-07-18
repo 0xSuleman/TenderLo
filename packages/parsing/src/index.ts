@@ -141,7 +141,7 @@ export async function runOcr(input: ParseDocumentInput): Promise<ParseDocumentRe
     const ocrInputPath = await preprocessOcrImage(inputPath, workdir, input);
     logger.info("Starting local Tesseract OCR.", { sourceUrl: input.sourceUrl, filename: input.filename });
     const languages = await resolveTesseractLanguages(input);
-    const { stdout } = await execFileAsync("tesseract", [ocrInputPath, "stdout", "-l", languages], {
+    const { stdout } = await execFileAsync(tesseractBinary(), [ocrInputPath, "stdout", "-l", languages], {
       timeout: parsingRuntimeConfig.ocrTimeoutMs,
       maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
     });
@@ -193,7 +193,7 @@ export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumen
   try {
     await writeFile(inputPath, input.buffer);
     await execFileAsync(
-      "pdftoppm",
+      pdfToImageBinary(),
       ["-f", "1", "-l", String(parsingRuntimeConfig.ocrMaxPdfPages), "-r", "200", "-png", inputPath, outputPrefix],
       {
         timeout: parsingRuntimeConfig.ocrTimeoutMs,
@@ -219,7 +219,7 @@ export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumen
     for (const [index, pageFile] of pageFiles.entries()) {
       const pagePath = join(workdir, pageFile);
       const ocrInputPath = await preprocessOcrImage(pagePath, workdir, input);
-      const { stdout } = await execFileAsync("tesseract", [ocrInputPath, "stdout", "-l", languages], {
+      const { stdout } = await execFileAsync(tesseractBinary(), [ocrInputPath, "stdout", "-l", languages], {
         timeout: parsingRuntimeConfig.ocrTimeoutMs,
         maxBuffer: parsingRuntimeConfig.ocrMaxBufferBytes
       });
@@ -265,6 +265,17 @@ export async function runPdfOcr(input: ParseDocumentInput): Promise<ParseDocumen
   } finally {
     await rm(workdir, { recursive: true, force: true });
   }
+}
+
+function pdfToImageBinary(): string {
+  // Production workers set this when Poppler is not present on PATH (notably
+  // Windows workers installed through winget). Keep the default portable for
+  // Linux containers where pdftoppm is supplied by the Poppler package.
+  return process.env.TENDERLO_PDFTOPPM_PATH?.trim() || "pdftoppm";
+}
+
+function tesseractBinary(): string {
+  return process.env.TENDERLO_TESSERACT_PATH?.trim() || "tesseract";
 }
 
 async function preprocessOcrImage(inputPath: string, workdir: string, input: ParseDocumentInput): Promise<string> {
@@ -325,7 +336,7 @@ async function resolveTesseractLanguages(input: ParseDocumentInput): Promise<str
 async function listTesseractLanguages(): Promise<string[]> {
   if (availableTesseractLanguages) return availableTesseractLanguages;
   try {
-    const { stdout, stderr } = await execFileAsync("tesseract", ["--list-langs"], { timeout: 5_000 });
+    const { stdout, stderr } = await execFileAsync(tesseractBinary(), ["--list-langs"], { timeout: 5_000 });
     availableTesseractLanguages = `${stdout}\n${stderr}`
       .split(/\r?\n/g)
       .map((line) => line.trim())
