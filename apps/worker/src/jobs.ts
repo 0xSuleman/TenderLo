@@ -86,6 +86,7 @@ export async function processQueuedIngestionJobs(supabase = createServiceClient(
     }
     processed += 1;
   }
+  await enforceMachineQualityGate(supabase);
   return processed;
 }
 
@@ -131,6 +132,7 @@ async function ingestAllDueSourcesLegacy(): Promise<void> {
       });
     }
   }
+  await enforceMachineQualityGate(supabase);
 }
 
 export async function ingestSource(sourceId: string, job?: ClaimedIngestionJob): Promise<void> {
@@ -438,6 +440,92 @@ export async function sendPendingAlerts(): Promise<void> {
   }
 }
 
+/**
+ * Enforces the machine-owned publication boundary. Tenders that never passed
+ * document parsing or deterministic classification are removed; stale QA
+ * incidents are dismissed after the machine has made that disposition.
+ */
+export async function enforceMachineQualityGate(supabase = createServiceClient()): Promise<{
+  discardedTenders: number;
+  dismissedTasks: number;
+  rejectedDuplicateCandidates: number;
+}> {
+  const candidates: any[] = [];
+  for (let offset = 0; ; offset += 500) {
+    const { data, error } = await supabase
+      .from("tenders")
+      .select("id,status,title,tender_number,department,source_url,advertisement_date,closing_date,sector")
+      .in("status", ["published", "corrigendum", "under_review"])
+      .order("created_at", { ascending: true })
+      .range(offset, offset + 499);
+    if (error) throw error;
+    candidates.push(...(data ?? []));
+    if ((data?.length ?? 0) < 500) break;
+  }
+
+  const parsedTenderIds = new Set<string>();
+  const storagePathsByTenderId = new Map<string, string[]>();
+  for (let offset = 0; offset < candidates.length; offset += 100) {
+    const tenderIds = candidates.slice(offset, offset + 100).map((tender) => tender.id);
+    const { data: documents, error } = await supabase
+      .from("tender_documents")
+      .select("tender_id,parser_status,storage_path")
+      .in("tender_id", tenderIds);
+    if (error) throw error;
+    for (const document of documents ?? []) {
+      if (document.parser_status === "parsed") parsedTenderIds.add(document.tender_id);
+      const paths = storagePathsByTenderId.get(document.tender_id) ?? [];
+      if (document.storage_path) paths.push(document.storage_path);
+      storagePathsByTenderId.set(document.tender_id, paths);
+    }
+  }
+
+  const discardIds = candidates
+    .filter((tender) => tender.status === "under_review"
+      || !parsedTenderIds.has(tender.id)
+      || !tender.title
+      || !tender.tender_number
+      || !tender.department
+      || !tender.source_url
+      || !tender.advertisement_date
+      || !tender.closing_date
+      || !tender.sector
+      || tender.sector === "uncategorized")
+    .map((tender) => tender.id);
+
+  const storagePaths = discardIds.flatMap((id) => storagePathsByTenderId.get(id) ?? []);
+  for (let offset = 0; offset < storagePaths.length; offset += 100) {
+    const { error } = await supabase.storage.from("tender-documents").remove(storagePaths.slice(offset, offset + 100));
+    if (error) throw error;
+  }
+  for (let offset = 0; offset < discardIds.length; offset += 100) {
+    const { error } = await supabase.from("tenders").delete().in("id", discardIds.slice(offset, offset + 100));
+    if (error) throw error;
+  }
+
+  const { data: dismissedTasks, error: taskError } = await supabase
+    .from("qa_tasks")
+    .update({ status: "dismissed", resolved_at: new Date().toISOString() })
+    .in("status", ["open", "in_progress"])
+    .select("id");
+  if (taskError) throw taskError;
+
+  const { data: rejectedDuplicates, error: duplicateError } = await supabase
+    .from("duplicate_candidates")
+    .update({ status: "rejected" })
+    .eq("status", "pending")
+    .select("id");
+  if (duplicateError) throw duplicateError;
+
+  const result = {
+    discardedTenders: discardIds.length,
+    dismissedTasks: dismissedTasks?.length ?? 0,
+    rejectedDuplicateCandidates: rejectedDuplicates?.length ?? 0
+  };
+  logger.info("Machine quality gate completed.", result);
+  return result;
+}
+
 export async function backfillStoredTenderFields(sourceId?: string, tenderId?: string, startOffset = 0): Promise<void> {
   const supabase = createServiceClient();
   const { data: sources, error: sourceError } = await supabase.from("tender_sources").select("id,adapter_key");
@@ -584,7 +672,11 @@ async function upsertTenderFromPayload(
   let preparedAdmissionDocument: PreparedTenderDocument | undefined;
 
   if (!existing) {
-    const admissionErrors = validateNewTenderAdmission(payload);
+    const admissionErrors = [
+      ...validateNewTenderAdmission(payload),
+      ...(primarySector === "uncategorized" ? ["Tender sector could not be classified deterministically."] : []),
+      ...(sourceRequiresReview ? [`Source status is not publishable: ${payload.sourceStatus}.`] : [])
+    ];
     if (admissionErrors.length) {
       await createRejectedTenderQaTask(supabase, source, payload, admissionErrors);
       return { admitted: false, documentsDownloaded: 0, documentsFailed: 0 };
@@ -622,7 +714,7 @@ async function upsertTenderFromPayload(
       bid_security_amount: payload.bidSecurityAmount ?? derived.bid_security_amount,
       estimated_value: payload.estimatedValue ?? derived.estimated_value,
       document_fee: payload.documentFee ?? derived.document_fee,
-      status: extractionConfidence >= pipelineRuntimeConfig.publishConfidenceThreshold && primarySector !== "uncategorized" && !sourceRequiresReview ? "published" : "under_review",
+      status: primarySector !== "uncategorized" && !sourceRequiresReview ? "published" : "cancelled",
       extraction_confidence: extractionConfidence,
       is_human_verified: false
     };
@@ -824,6 +916,9 @@ async function prepareTenderDocument(document: RawTenderDocument): Promise<Prepa
     filename,
     sourceUrl: document.url
   });
+  if (parsed.parserStatus !== "parsed" || parsed.pages.length === 0) {
+    throw new Error(parsed.errorMessage || "Tender document could not be parsed into evidence text.");
+  }
   return {
     document,
     buffer: fetched.buffer,
@@ -1246,13 +1341,13 @@ async function detectAndMergeDuplicates(supabase: DatabaseClient, tender: any): 
       // tender.id is the freshly-ingested primary; candidate.id is the older duplicate to remove
       await mergeTenderRecords(supabase, tender.id, candidate.id);
     } else {
-      await createQaTask(supabase, {
-        tenderId: tender.id,
-        taskType: "duplicate_review",
-        priority: "medium",
-        title: "Possible duplicate tender needs review",
-        details: safeJson(result)
-      });
+      // Ambiguous candidates remain separate. Deterministically rejecting the
+      // merge avoids silently combining distinct procurements.
+      await supabase
+        .from("duplicate_candidates")
+        .update({ status: "rejected" })
+        .eq("tender_id", tender.id)
+        .eq("candidate_tender_id", candidate.id);
     }
   }
   return duplicates;
