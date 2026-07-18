@@ -245,18 +245,20 @@ export function TenderListInteractive({ tenders, fullAccess }: TenderListProps):
                       <div className="grid gap-4 sm:grid-cols-3 text-sm">
                         <div>
                           <dt className="text-muted-foreground">Estimated cost</dt>
-                          <dd className="font-semibold text-slate-800 mt-0.5">{details.estimated_cost ?? "Cost Not Available"}</dd>
+                          <dd className="font-semibold text-slate-800 mt-0.5">
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.estimated_cost ?? "Cost Not Available")}
+                          </dd>
                         </div>
                         <div>
                           <dt className="text-muted-foreground">Bid Security</dt>
                           <dd className="font-semibold text-slate-800 mt-0.5">
-                            {details.bid_security_amount ? `Rs. ${Number(details.bid_security_amount).toLocaleString("en-PK")}` : "Needs verification"}
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.bid_security_amount ? `Rs. ${Number(details.bid_security_amount).toLocaleString("en-PK")}` : "Needs verification")}
                           </dd>
                         </div>
                         <div>
                           <dt className="text-muted-foreground">Document Fee</dt>
                           <dd className="font-semibold text-slate-800 mt-0.5">
-                            {details.document_fee ? `Rs. ${Number(details.document_fee).toLocaleString("en-PK")}` : "Free"}
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.document_fee ? `Rs. ${Number(details.document_fee).toLocaleString("en-PK")}` : "Free")}
                           </dd>
                         </div>
                       </div>
@@ -268,15 +270,21 @@ export function TenderListInteractive({ tenders, fullAccess }: TenderListProps):
                       <div className="grid gap-3 text-sm">
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                           <span className="text-muted-foreground">PEC Requirements</span>
-                          <span className="font-bold text-slate-800">{details.pec_category ?? "Not stated"}</span>
+                          <span className="font-bold text-slate-800">
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.pec_category ?? "Not stated")}
+                          </span>
                         </div>
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                           <span className="text-muted-foreground">Procurement Method</span>
-                          <span className="font-bold text-slate-800">{details.procurement_method ?? "Needs review"}</span>
+                          <span className="font-bold text-slate-800">
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.procurement_method ?? "Needs review")}
+                          </span>
                         </div>
                         <div className="flex items-center justify-between pb-1">
                           <span className="text-muted-foreground">Submission Method</span>
-                          <span className="font-bold text-slate-800">{details.submission_method ?? "Needs review"}</span>
+                          <span className="font-bold text-slate-800">
+                            {details.preview_notice ? "🔒 Paid Plan Required" : (details.submission_method ?? "Needs review")}
+                          </span>
                         </div>
                       </div>
                     </div>

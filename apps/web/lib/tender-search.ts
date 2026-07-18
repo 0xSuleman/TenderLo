@@ -279,8 +279,12 @@ function applyClosingDateFilter(query: any, input: TenderSearchInput): any {
 function applyEstimatedCostFilter(query: any, input: TenderSearchInput): any {
   if (input.estimated_cost_filter === "not_available") return query.is("estimated_value", null);
   if (input.estimated_cost_filter === "under_10_lac") return query.lt("estimated_value", 1_000_000);
-  if (input.estimated_cost_filter === "10_lac_50_lac") return query.gte("estimated_value", 1_000_000).lt("estimated_value", 5_000_000);
-  if (input.estimated_cost_filter === "50_lac_1_crore") return query.gte("estimated_value", 5_000_000).lt("estimated_value", 10_000_000);
+  if (input.estimated_cost_filter === "10_lac_50_lac") {
+    return query.and("estimated_value.gte.1000000,estimated_value.lt.5000000");
+  }
+  if (input.estimated_cost_filter === "50_lac_1_crore") {
+    return query.and("estimated_value.gte.5000000,estimated_value.lt.10000000");
+  }
   if (input.estimated_cost_filter === "1_crore_plus") return query.gte("estimated_value", 10_000_000);
   return query;
 }
