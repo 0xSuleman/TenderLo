@@ -43,7 +43,7 @@ export default async function RecommendationsPage(): Promise<JSX.Element> {
                   <p className="rounded-md bg-white/58 p-3"><strong>Warnings:</strong> {rec.warnings?.join("; ") || "None"}</p>
                   <p className="rounded-md bg-white/58 p-3"><strong>Blockers:</strong> {rec.blockers?.join("; ") || "None"}</p>
                 </div>
-                <LinkButton className="mt-4" href={`/tenders/${rec.tender_id}`}>Review tender</LinkButton>
+                <LinkButton className="mt-4" href={`/tenders/${rec.tender_id}`}>View Tender</LinkButton>
               </Card>
             </MotionItem>
           ))}

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PermanentSourceError } from "@tenderlo/shared";
-import { fetchBinary, getSourceAdapter, normalizeSourceUrl, parseBppraDeadline, parseFederalEpadsDeadline, parseFederalPpraDate, parseSindhPpraDateTime } from "@tenderlo/sources";
+import { fetchBinary, getSourceAdapter, normalizeSourceUrl, parseBppraDeadline, parseFederalEpadsDeadline, parseFederalEpadsListing, parseFederalPpraDate, parseSindhPpraDateTime } from "@tenderlo/sources";
 
 describe("public source adapters", () => {
   afterEach(() => {
@@ -49,7 +49,8 @@ describe("public source adapters", () => {
             documentTemplateName: "Standard Bidding Document",
             procurementPlansDetailID: requestBody.Id + 130020,
             publishDate: "2026-07-17T18:09:08.293",
-            isCorrigendum: 0
+            isCorrigendum: 0,
+            fileContent: "large-runtime-payload-must-not-enter-raw-snapshot"
           }]
         });
       }
@@ -119,6 +120,8 @@ describe("public source adapters", () => {
       paPublicationCount: 1
     });
     expect(tenders[0]?.rawSnapshot).toMatchObject({ contentType: "application/json; charset=utf-8", extension: "json" });
+    expect(tenders[0]?.rawSnapshot?.content).toContain('"dmS_FileID":8425687');
+    expect(tenders[0]?.rawSnapshot?.content).not.toContain("large-runtime-payload-must-not-enter-raw-snapshot");
 
     const downloaded = await fetchBinary(
       tenders[0]!.documents[0]!.url,
@@ -170,6 +173,8 @@ describe("public source adapters", () => {
       mimeType: "application/pdf",
       sourceDocumentKey: "epads_P53111_sbd"
     });
+    const pettyPurchase = parseFederalEpadsListing(federalEpadsListing(federalEpadsRow(53112, 2).replace("Single Stage-Two Envelope", "Petty Purchase")), "https://epads.gov.pk/?page=1");
+    expect(pettyPurchase[0]?.documents).toEqual([]);
   });
 
   it("posts through every Punjab PPRA grid page and keeps both official PDFs", async () => {
@@ -404,25 +409,18 @@ describe("public source adapters", () => {
     });
     expect(tenders[0]?.documents).toMatchObject([
       {
-        url: "https://bpptwo.vdc.services:9446/Reports/Works/BiddingDocumentWorks.html?id=98216",
-        mimeType: "text/html",
-        sourceDocumentKey: "bppra_bidding_98216"
-      },
-      {
-        url: "https://bpptwo.vdc.services:9446/Reports/GoodsProcurement/NITDocument.html?id=98216",
-        mimeType: "text/html",
-        sourceDocumentKey: "bppra_nit_98216"
-      },
-      {
         url: "https://bpptwo.vdc.services:9446/Images/BOQManual/works-report.pdf",
         mimeType: "application/pdf",
-        sourceDocumentKey: "bppra_boq_98216"
+        sourceDocumentKey: "bppra_notice_98216"
       }
     ]);
     expect(tenders[0]?.rawSnapshot).toMatchObject({ contentType: "application/json; charset=utf-8", extension: "json" });
-    expect(tenders[1]?.documents.slice(0, 2).map((document) => document.url)).toEqual([
-      "https://bpptwo.vdc.services:9446/Reports/PQN/ANRPCDocumentReport.html?id=95000",
-      "https://bpptwo.vdc.services:9446/Reports/PQN/NITDocumentANRPC.html?id=95000"
+    expect(tenders[1]?.documents).toMatchObject([
+      {
+        url: "https://bpptwo.vdc.services:9446/Images/BOQManual/works-report.pdf",
+        mimeType: "application/pdf",
+        sourceDocumentKey: "bppra_notice_98217"
+      }
     ]);
   });
 
@@ -606,13 +604,16 @@ function kpPpraRow(tenderNumber: number): string {
   const biddingDocument = tenderNumber === 32484
     ? `<a href="http://www.kppra.gov.pk/kppra/staff/force_download.php?file=dept/upload/1784268775cnwkohistanupperbidding.pdf">Download bidding</a>`
     : "Can be obtained from the P.E office";
+  const noticeHref = tenderNumber === 32478
+    ? `staff/force_download.php?file=dept/upload/${noticeFile}`
+    : `http://www.kppra.gov.pk/kppra/staff/force_download.php?file=dept/upload/${noticeFile}`;
   return `<tr>
     <td>${tenderNumber}</td>
     <td>KP procurement ${tenderNumber}</td>
     <td>C&amp;W Division Kohistan Upper</td>
     <td>17-Jul-2026</td>
     <td>05-Aug-2026</td>
-    <td><a href="http://www.kppra.gov.pk/kppra/staff/force_download.php?file=dept/upload/${noticeFile}">Download notice</a></td>
+    <td><a href="${noticeHref}">Download notice</a></td>
     <td>${biddingDocument}</td>
     <td><a onclick="details(${tenderNumber + 3000})">Details</a></td>
   </tr>

@@ -28,7 +28,7 @@ export function MarketingNav(): JSX.Element {
       <a className="rounded-md px-2 py-1 font-display text-xl font-semibold text-foreground transition hover:bg-white/66" href="/">
         TenderLo
       </a>
-      <div className="flex flex-wrap items-center justify-end gap-2 text-sm font-medium sm:gap-3">
+      <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-1 text-sm font-medium sm:w-auto sm:justify-end sm:gap-3">
         {links.map((link) => (
           <a
             key={link.href}

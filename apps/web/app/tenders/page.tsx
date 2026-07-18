@@ -153,7 +153,7 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
                   <p className="mt-2 text-sm text-muted-foreground">{String(tender.department ?? "Department needs review")} · {String(tender.city ?? tender.province ?? "Pakistan")}</p>
                   <p className="mt-2 text-sm">Closing: {formatDate(tender.closing_date as string | null | undefined)}</p>
                   {typeof tender.preview === "string" && tender.preview ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{tender.preview}</p> : null}
-                  <LinkButton className="mt-4" href={tenderHref(tender)}>Open preview</LinkButton>
+                  <LinkButton className="mt-4" href={tenderHref(tender)}>View Tender</LinkButton>
                 </Card>
               </MotionItem>
             ))}

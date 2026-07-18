@@ -6,6 +6,7 @@ import {
   calculateDuplicateConfidence,
   classifyTender,
   classifyTenderCategory,
+  extractFederalEpadsDocumentFields,
   extractKpPpraNoticeFields,
   extractPunjabPpraCorrectionFields,
   extractTenderFields,
@@ -224,6 +225,101 @@ export async function sendPendingAlerts(): Promise<void> {
   }
 }
 
+export async function backfillStoredTenderFields(sourceId?: string, tenderId?: string, startOffset = 0): Promise<void> {
+  const supabase = createServiceClient();
+  const { data: sources, error: sourceError } = await supabase.from("tender_sources").select("id,adapter_key");
+  if (sourceError) throw sourceError;
+  const adapterBySourceId = new Map<string, string | null>((sources ?? []).map((source: any) => [source.id, source.adapter_key as string | null]));
+  let documentOffset = startOffset;
+  let processedDocuments = 0;
+  let refreshedFields = 0;
+  const batchSize = 10;
+
+  while (true) {
+    let documentQuery = supabase
+      .from("tender_documents")
+      .select("id,tender_id,tenders!inner(source_id,is_human_verified,closing_date,opening_date,bid_security_amount,estimated_value,document_fee,province,city)")
+      .eq("parser_status", "parsed")
+      .order("created_at", { ascending: true })
+      .range(documentOffset, documentOffset + batchSize - 1);
+    if (sourceId) documentQuery = documentQuery.eq("tenders.source_id", sourceId);
+    if (tenderId && tenderId !== "all") documentQuery = documentQuery.eq("tender_id", tenderId);
+    const { data: documents, error: documentError } = await documentQuery;
+    if (documentError) throw documentError;
+    if (!documents?.length) break;
+
+    const documentIds = documents.map((document: any) => document.id);
+    const { data: pages, error: pageError } = await supabase
+      .from("parsed_document_text")
+      .select("tender_document_id,page_number,text")
+      .in("tender_document_id", documentIds)
+      .order("page_number", { ascending: true });
+    if (pageError) throw pageError;
+    const textByDocumentId = new Map<string, string[]>();
+    for (const page of pages ?? []) {
+      const values = textByDocumentId.get(page.tender_document_id) ?? [];
+      values.push(page.text);
+      textByDocumentId.set(page.tender_document_id, values);
+    }
+
+    const fieldsByDocumentId = new Map<string, ExtractedFieldResult[]>();
+    for (const document of documents as any[]) {
+      const tenderRelation = Array.isArray(document.tenders) ? document.tenders[0] : document.tenders;
+      if (!tenderRelation || tenderRelation.is_human_verified) continue;
+      const documentText = (textByDocumentId.get(document.id) ?? []).join("\n");
+      if (!documentText.trim()) continue;
+      const fields = normalizeDocumentFieldsForSource(
+        extractTenderFields(documentText),
+        adapterBySourceId.get(tenderRelation.source_id),
+        documentText
+      ).filter((field) => field.confidenceScore >= pipelineRuntimeConfig.lowConfidenceFieldThreshold && field.verificationStatus !== "needs_review");
+      fieldsByDocumentId.set(document.id, fields);
+    }
+
+    const { error: deleteError } = await supabase
+      .from("extracted_fields")
+      .delete()
+      .in("tender_id", [...new Set((documents as any[]).map((document) => document.tender_id))])
+      .in("tender_document_id", documentIds)
+      .neq("verification_status", "verified");
+    if (deleteError) throw deleteError;
+
+    const fieldRows = (documents as any[]).flatMap((document) => (fieldsByDocumentId.get(document.id) ?? []).map((field) => ({
+      tender_id: document.tender_id,
+      tender_document_id: document.id,
+      field_name: field.fieldName,
+      field_value: field.fieldValue,
+      source_method: field.sourceMethod,
+      confidence_score: field.confidenceScore,
+      evidence_text: field.evidenceText,
+      verification_status: field.verificationStatus
+    })));
+    for (let fieldOffset = 0; fieldOffset < fieldRows.length; fieldOffset += 500) {
+      const { error: insertError } = await supabase.from("extracted_fields").insert(fieldRows.slice(fieldOffset, fieldOffset + 500));
+      if (insertError) throw insertError;
+    }
+
+    for (const document of documents as any[]) {
+      const tenderRelation = Array.isArray(document.tenders) ? document.tenders[0] : document.tenders;
+      const fields = fieldsByDocumentId.get(document.id) ?? [];
+      if (!tenderRelation || !fields.length) continue;
+      const updates = buildTenderFieldPromotion(tenderRelation, fields);
+      if (Object.keys(updates).length) {
+        const { error: updateError } = await supabase.from("tenders").update(updates).eq("id", document.tender_id);
+        if (updateError) throw updateError;
+      }
+      processedDocuments += 1;
+      refreshedFields += fields.length;
+    }
+
+    documentOffset += documents.length;
+    logger.info("Stored tender field backfill batch completed.", { processedDocuments, refreshedFields, sourceId: sourceId ?? "all", tenderId: tenderId ?? "all" });
+    if (documents.length < batchSize) break;
+  }
+
+  logger.info("Stored tender field backfill completed.", { processedDocuments, refreshedFields, sourceId: sourceId ?? "all", tenderId: tenderId ?? "all" });
+}
+
 async function upsertTenderFromPayload(
   supabase: DatabaseClient,
   source: { id: string; source_type: string; name: string; adapter_key?: string | null; metadata?: Json | null },
@@ -245,10 +341,13 @@ async function upsertTenderFromPayload(
   const classification = classifyTender({ title: payload.title, description: payload.description ?? null });
   const procurementCategory = payload.procurementCategory ?? classifyTenderCategory({ title: payload.title, description: payload.description ?? null });
   const primarySector = classification.find((match) => match.isPrimary)?.sector ?? "uncategorized";
-  const extractionFields = [
+  let extractionFields = [
     ...extractTenderFields(`${payload.title}\n${payload.description ?? ""}`),
     ...payloadMetadataFields(payload)
   ];
+  if (source.adapter_key === "federal-epads" || source.adapter_key === "federal-ppra-active") {
+    extractionFields = appendFederalEstimatedValueLowerBound(extractionFields);
+  }
   const derived = deriveTenderValues(payload, extractionFields);
   const extractionConfidence = extractionFields.length
     ? extractionFields.reduce((sum, field) => sum + field.confidenceScore, 0) / extractionFields.length
@@ -438,6 +537,9 @@ export function validateNewTenderAdmission(payload: RawTenderPayload, now = new 
     errors.push("Tender closing date has already passed.");
   }
   if (!payload.documents.length) errors.push("No primary tender document was advertised by the source.");
+  else if (!payload.documents.some(isBinaryTenderDocumentReference)) {
+    errors.push("No downloadable PDF, DOCX, or image tender document was advertised by the source.");
+  }
   return errors;
 }
 
@@ -677,6 +779,10 @@ export function validateDownloadedDocument(input: {
   const expectsTiff = /\.tiff?$/.test(filename) || contentType === "image/tiff";
   const expectsWebp = filename.endsWith(".webp") || contentType === "image/webp";
 
+  if (contentType === "text/html" || /\.html?$/.test(filename)) {
+    return "HTML portal pages are not downloadable tender documents.";
+  }
+
   if (expectsPdf && input.buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
     return "Expected a PDF but the response does not have a PDF signature.";
   }
@@ -699,12 +805,26 @@ export function validateDownloadedDocument(input: {
   return null;
 }
 
+function isBinaryTenderDocumentReference(document: RawTenderDocument): boolean {
+  const mimeType = (document.mimeType ?? "").toLowerCase();
+  const filename = (document.filename ?? new URL(document.url).pathname).toLowerCase();
+  return mimeType === "application/pdf"
+    || mimeType.includes("wordprocessingml")
+    || mimeType.startsWith("image/")
+    || /\.(?:pdf|docx|jpe?g|png|tiff?|webp)$/.test(filename);
+}
+
 function normalizeDocumentFieldsForSource(
   fields: ExtractedFieldResult[],
   adapterKey: string | null | undefined,
   documentText: string
 ): ExtractedFieldResult[] {
   let normalizedFields = fields;
+  if (adapterKey === "federal-epads") {
+    const epadsFields = extractFederalEpadsDocumentFields(documentText);
+    const preciseNames = new Set(epadsFields.map((field) => field.fieldName));
+    normalizedFields = [...epadsFields, ...fields.filter((field) => !preciseNames.has(field.fieldName))];
+  }
   if (adapterKey === "punjab-ppra") {
     const corrections = extractPunjabPpraCorrectionFields(documentText);
     const correctedNames = new Set(corrections.map((field) => field.fieldName));
@@ -722,6 +842,9 @@ function normalizeDocumentFieldsForSource(
           : field)
     ];
   }
+  if (adapterKey === "federal-epads" || adapterKey === "federal-ppra-active") {
+    normalizedFields = appendFederalEstimatedValueLowerBound(normalizedFields);
+  }
   if (adapterKey !== "federal-epads" && adapterKey !== "federal-ppra-active" && adapterKey !== "punjab-ppra" && adapterKey !== "kp-ppra-active" && adapterKey !== "balochistan-bppra" && adapterKey !== "sindh-sppra") return normalizedFields;
   return normalizedFields.map((field) => {
     if (field.fieldName !== "closing_date" && field.fieldName !== "opening_date") return field;
@@ -732,6 +855,38 @@ function normalizeDocumentFieldsForSource(
       fieldValue: new Date(parsed.getTime() - 5 * 60 * 60 * 1000).toISOString()
     };
   });
+}
+
+export function appendFederalEstimatedValueLowerBound(fields: ExtractedFieldResult[]): ExtractedFieldResult[] {
+  if (fields.some((field) => field.fieldName === "estimated_value" || field.fieldName === "estimated_value_summary")) return fields;
+  const securities = fields
+    .filter((field) => field.fieldName === "bid_security_amount" && field.confidenceScore >= 0.82 && field.verificationStatus !== "needs_review")
+    .map((field) => ({ field, value: Number(field.fieldValue) }))
+    .filter((item) => Number.isFinite(item.value) && item.value > 0)
+    .sort((left, right) => left.value - right.value);
+  const security = securities[0];
+  if (!security) return fields;
+  const lowerBound = security.value * 20;
+  const evidenceText = `Derived lower bound under PPRA Rule 25 (bid security may not exceed 5% of estimated value). ${security.field.evidenceText}`;
+  return [
+    ...fields,
+    {
+      fieldName: "estimated_value_lower_bound",
+      fieldValue: String(lowerBound),
+      sourceMethod: "table_rule",
+      confidenceScore: 0.8,
+      evidenceText,
+      verificationStatus: "unverified"
+    },
+    {
+      fieldName: "estimated_value_summary",
+      fieldValue: `At least PKR ${lowerBound.toLocaleString("en-PK")} (Rule 25 lower bound; exact estimate not published)`,
+      sourceMethod: "table_rule",
+      confidenceScore: 0.8,
+      evidenceText,
+      verificationStatus: "unverified"
+    }
+  ];
 }
 
 async function promoteDocumentFieldsToTender(
@@ -769,7 +924,10 @@ export function buildTenderFieldPromotion(
     const replaceApproximatePortalDeadline = field.fieldName === "closing_date"
       && typeof existingValue === "string"
       && existingValue.endsWith("T18:59:59.999Z");
-    if (existingValue !== null && existingValue !== undefined && !replaceApproximatePortalDeadline) continue;
+    const replaceAutomatedBidSecurity = field.fieldName === "bid_security_amount"
+      && field.sourceMethod === "table_rule"
+      && field.confidenceScore >= 0.9;
+    if (existingValue !== null && existingValue !== undefined && !replaceApproximatePortalDeadline && !replaceAutomatedBidSecurity) continue;
     if (updates[field.fieldName] !== undefined) continue;
     if (field.confidenceScore < pipelineRuntimeConfig.lowConfidenceFieldThreshold || field.verificationStatus === "needs_review") continue;
     if (["bid_security_amount", "estimated_value", "document_fee"].includes(field.fieldName)) {
@@ -1017,6 +1175,12 @@ function deriveTenderValues(payload: RawTenderPayload, fields: ExtractedFieldRes
 function payloadMetadataFields(payload: RawTenderPayload): ExtractedFieldResult[] {
   const fields: ExtractedFieldResult[] = [];
   const evidence = normalizeWhitespace(`${payload.title}\n${payload.description ?? ""}`).slice(0, 500);
+  const contactEvidence = normalizeWhitespace(payload.contactPerson ?? "");
+  const contactEmail = contactEvidence.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0];
+  const contactPhone = contactEvidence.match(/(?:\+?92[\s().-]*|0)(?:3\d{2}|\d{2,3})[\s().-]*\d{3,4}[\s.-]*\d{3,4}\b/)?.[0];
+  const tenderType = metadataString(sourceMetadataValue(payload.sourceMetadata, "tenderType"))
+    ?? metadataString(sourceMetadataValue(payload.sourceMetadata, "tseType"))
+    ?? payload.procurementCategory;
   for (const [fieldName, rawFieldValue, confidenceScore] of [
     ["tender_number", payload.tenderNumber, 0.92],
     ["department", payload.department, 0.9],
@@ -1031,7 +1195,12 @@ function payloadMetadataFields(payload: RawTenderPayload): ExtractedFieldResult[
     ["document_fee", payload.documentFee, 0.9],
     ["procurement_method", payload.procurementMethod, 0.82],
     ["submission_method", payload.submissionMethod, 0.82],
+    ["tender_type", tenderType, 0.82],
     ["contact_person", payload.contactPerson, 0.82],
+    ["contact_email", contactEmail, 0.88],
+    ["contact_phone", contactPhone, 0.86],
+    ["website_url", payload.websiteUrl, 0.9],
+    ["original_source_url", payload.originalSourceUrl ?? payload.sourceUrl, 0.9],
     ["source_status", payload.sourceStatus, 0.9]
   ] as const) {
     const fieldValue = rawFieldValue === undefined || rawFieldValue === null ? undefined : String(rawFieldValue);
@@ -1041,7 +1210,7 @@ function payloadMetadataFields(payload: RawTenderPayload): ExtractedFieldResult[
       fieldValue,
       sourceMethod: "html_selector",
       confidenceScore,
-      evidenceText: evidence || fieldValue,
+      evidenceText: fieldName.startsWith("contact_") && contactEvidence ? contactEvidence : evidence || fieldValue,
       verificationStatus: "unverified"
     });
   }

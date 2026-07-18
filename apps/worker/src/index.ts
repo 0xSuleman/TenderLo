@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { logger } from "@tenderlo/shared";
 import {
+  backfillStoredTenderFields,
   closeExpiredTenders,
   ingestAllDueSources,
   ingestSource,
@@ -10,6 +11,8 @@ import {
 
 const command = process.argv[2] ?? "help";
 const argument = process.argv[3];
+const secondArgument = process.argv[4];
+const thirdArgument = process.argv[5];
 
 async function main(): Promise<void> {
   if (command === "ingest-all") {
@@ -31,6 +34,10 @@ async function main(): Promise<void> {
   }
   if (command === "close-expired") {
     await closeExpiredTenders();
+    return;
+  }
+  if (command === "backfill-fields") {
+    await backfillStoredTenderFields(argument, secondArgument, Number(thirdArgument ?? 0));
     return;
   }
   if (command === "schedule") {
@@ -64,6 +71,7 @@ async function main(): Promise<void> {
   rebuild-recommendations [organization-id]
   send-alerts
   close-expired
+  backfill-fields [source-id] [tender-id|all] [start-offset]
   schedule`);
 }
 

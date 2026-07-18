@@ -235,7 +235,7 @@ function TenderResultCard({ tender, fullAccess }: { tender: Record<string, unkno
       ) : (
         <p className="mt-4 text-sm text-muted-foreground">Estimated cost, source URL, and documents are available on paid plans after verification.</p>
       )}
-      <LinkButton className="mt-4" href={tenderHref(tender)}>Open tender</LinkButton>
+      <LinkButton className="mt-4" href={tenderHref(tender)}>View Tender</LinkButton>
     </Card>
   );
 }

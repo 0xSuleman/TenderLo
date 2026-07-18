@@ -201,9 +201,6 @@ export function parseFederalEpadsListing(
     const procurementCategory = normalizeWhitespace(cells.eq(4).find(".badge").first().text());
     const procurementMethod = normalizeWhitespace(cells.eq(4).find("span.text-secondary").first().text());
     const hasStandardBiddingDocument = /\b(?:single|two) stage\b/i.test(procurementMethod);
-    const documentUrl = hasStandardBiddingDocument
-      ? `https://pa.epads.gov.pk/procurement/SBD/${tenderNumber.toLowerCase()}/bidding-document.pdf?download=true`
-      : sourceUrl;
     const description = normalizeWhitespace([
       title,
       department,
@@ -225,12 +222,12 @@ export function parseFederalEpadsListing(
       procurementMethod: procurementMethod || profile.defaultProcurementMethod,
       submissionMethod: profile.defaultSubmissionMethod,
       websiteUrl: "https://epads.gov.pk/",
-      documents: [{
-        url: documentUrl,
-        filename: hasStandardBiddingDocument ? `${tenderNumber}-bidding-document.pdf` : `${tenderNumber}-procurement-detail.html`,
-        mimeType: hasStandardBiddingDocument ? "application/pdf" : "text/html",
-        sourceDocumentKey: `epads_${tenderNumber}_${hasStandardBiddingDocument ? "sbd" : "detail"}`
-      }],
+      documents: hasStandardBiddingDocument ? [{
+        url: `https://pa.epads.gov.pk/procurement/SBD/${tenderNumber.toLowerCase()}/bidding-document.pdf?download=true`,
+        filename: `${tenderNumber}-bidding-document.pdf`,
+        mimeType: "application/pdf",
+        sourceDocumentKey: `epads_${tenderNumber}_sbd`
+      }] : [],
       rawHtml: rawRowHtml
     }));
     const payload = payloads.at(-1);
@@ -982,8 +979,8 @@ export function parseKpPpraListing(
     const documents: RawTenderPayload["documents"] = [];
     const tenderHref = cells.eq(5).find("a[href]").first().attr("href");
     const biddingHref = cells.eq(6).find("a[href]").first().attr("href");
-    if (tenderHref) documents.push(kpPpraDocument(new URL(tenderHref, pageUrl).toString(), "notice"));
-    if (biddingHref) documents.push(kpPpraDocument(new URL(biddingHref, pageUrl).toString(), "bidding"));
+    if (tenderHref) documents.push(kpPpraDocument(kpPpraDocumentUrl(tenderHref, pageUrl), "notice"));
+    if (biddingHref) documents.push(kpPpraDocument(kpPpraDocumentUrl(biddingHref, pageUrl), "bidding"));
 
     const correction = parseKpPpraCorrectionRow($, rowHandle.next("tr"), pageUrl);
     documents.push(...correction.documents);
@@ -1097,7 +1094,7 @@ function parseKpPpraCorrectionRow(
     if (description) descriptions.push(`Corrigendum: ${description}`);
     closingDate = parseKpPpraDate(cells.eq(2).text(), true) ?? closingDate;
     const href = cells.find("a[href]").first().attr("href");
-    if (href) documents.push(kpPpraDocument(new URL(href, pageUrl).toString(), "corrigendum"));
+    if (href) documents.push(kpPpraDocument(kpPpraDocumentUrl(href, pageUrl), "corrigendum"));
   });
   const result: { description?: string; closingDate?: string; documents: RawTenderPayload["documents"]; rawHtml?: string } = {
     documents,
@@ -1118,6 +1115,13 @@ function kpPpraDocument(url: string, kind: "notice" | "bidding" | "corrigendum")
     mimeType: mimeFromUrl(filename),
     sourceDocumentKey: `kp_${kind}_${filename.replace(/\.[^.]+$/, "")}`
   };
+}
+
+function kpPpraDocumentUrl(href: string, baseUrl: string): string {
+  const url = new URL(href, kpPpraPortalUrl("/kppra/", baseUrl));
+  url.protocol = "http:";
+  url.pathname = url.pathname.replace("/kppra/activetenders.php/staff/", "/kppra/staff/");
+  return url.toString();
 }
 
 function appendKpPpraDetailDocument(
@@ -1435,56 +1439,25 @@ function buildBppraPayload(
 function bppraDocuments(record: BppraTenderRecord, tenderNumber: string): RawTenderPayload["documents"] {
   if (!record.Id) return [];
   const documents: RawTenderPayload["documents"] = [];
-  const biddingPath = bppraBiddingReportPath(record);
-  if (biddingPath) {
-    documents.push({
-      url: `${bppraApiBaseUrl}${biddingPath}`,
-      filename: `${tenderNumber}-bidding-document.html`,
-      mimeType: "text/html",
-      sourceDocumentKey: `bppra_bidding_${record.Id}`
-    });
-  }
-  const nitPath = bppraNitReportPath(record);
-  if (nitPath) {
-    documents.push({
-      url: `${bppraApiBaseUrl}${nitPath}`,
-      filename: `${tenderNumber}-nit-report.html`,
-      mimeType: "text/html",
-      sourceDocumentKey: `bppra_nit_${record.Id}`
-    });
-  }
-  const attachment = cleanOptional(record.tenderNoticeDoc);
-  if (attachment) {
+  const attachments = [
+    [cleanOptional(record.tenderBidDoc), "bidding"],
+    [cleanOptional(record.tenderNoticeDoc), "notice"]
+  ] as const;
+  for (const [attachment, kind] of attachments) {
+    if (!attachment || !isBinaryTenderAttachment(attachment)) continue;
     const attachmentUrl = new URL(`/Images/${attachment.replace(/^\/+/, "")}`, bppraApiBaseUrl).toString();
     documents.push({
       url: attachmentUrl,
       filename: attachment.split("/").filter(Boolean).at(-1) ?? `${tenderNumber}-boq.pdf`,
       mimeType: mimeFromUrl(attachment),
-      sourceDocumentKey: `bppra_boq_${record.Id}`
+      sourceDocumentKey: `bppra_${kind}_${record.Id}`
     });
   }
   return dedupeDocuments(documents);
 }
 
-function bppraBiddingReportPath(record: BppraTenderRecord): string | undefined {
-  if (!record.Id) return undefined;
-  const type = record.PType?.toLowerCase();
-  if (type === "rfp") return `/Reports/CS/RFPDocument.html?id=${record.Id}`;
-  if (type === "anrpc" && record.PlanningId) return `/Reports/PQN/ANRPCDocumentReport.html?id=${record.PlanningId}`;
-  if (record.ProcurementCategoryID === 3) return `/Reports/Works/BiddingDocumentWorks.html?id=${record.Id}`;
-  if (record.ProcurementCategoryID === 1 || record.ProcurementCategoryID === 2) {
-    return `/Reports/GoodsProcurement/BiddingDocument.html?id=${record.Id}`;
-  }
-  return undefined;
-}
-
-function bppraNitReportPath(record: BppraTenderRecord): string | undefined {
-  if (!record.Id) return undefined;
-  const type = record.PType?.toLowerCase();
-  if (type === "rfp") return `/Reports/GoodsProcurement/RFPNITDocument.html?id=${record.Id}`;
-  if (type === "anrpc" && record.PlanningId) return `/Reports/PQN/NITDocumentANRPC.html?id=${record.PlanningId}`;
-  if (type === "eoics") return `/Reports/GoodsProcurement/NITDocumentCSEOI.html?id=${record.Id}`;
-  return `/Reports/GoodsProcurement/NITDocument.html?id=${record.Id}`;
+function isBinaryTenderAttachment(value: string): boolean {
+  return /\.(?:pdf|docx|jpe?g|png|tiff?|webp)(?:$|[?#])/i.test(value);
 }
 
 function bppraProcurementCategory(value: number | undefined): string | undefined {
@@ -1956,8 +1929,8 @@ function buildSindhPpraPayload(
   if (record.procurementCategory) payload.procurementCategory = normalizeWhitespace(record.procurementCategory);
   const snapshot = {
     record,
-    biddingDocuments: lookup.primary,
-    paPublishedDocuments: lookup.publications,
+    biddingDocuments: lookup.primary.map(sindhPpraDocumentSnapshot),
+    paPublishedDocuments: lookup.publications.map(sindhPpraDocumentSnapshot),
     documentLookupErrors
   };
   payload.raw = safeJson({
@@ -1993,6 +1966,20 @@ function buildSindhPpraPayload(
     reportedPaPublicationCount: lookup.publications.length
   });
   return payload;
+}
+
+function sindhPpraDocumentSnapshot(record: SindhPpraDocumentRecord): SindhPpraDocumentRecord {
+  const snapshot: SindhPpraDocumentRecord = {};
+  if (record.dmS_FileID !== undefined) snapshot.dmS_FileID = record.dmS_FileID;
+  if (record.dmS_FileGUID !== undefined) snapshot.dmS_FileGUID = record.dmS_FileGUID;
+  if (record.tr_PublishedDocumentID !== undefined) snapshot.tr_PublishedDocumentID = record.tr_PublishedDocumentID;
+  if (record.tR_DocumentTemplateID !== undefined) snapshot.tR_DocumentTemplateID = record.tR_DocumentTemplateID;
+  if (record.documentTemplateName !== undefined) snapshot.documentTemplateName = record.documentTemplateName;
+  if (record.procurementPlansDetailID !== undefined) snapshot.procurementPlansDetailID = record.procurementPlansDetailID;
+  if (record.publishedDocumentID !== undefined) snapshot.publishedDocumentID = record.publishedDocumentID;
+  if (record.publishDate !== undefined) snapshot.publishDate = record.publishDate;
+  if (record.isCorrigendum !== undefined) snapshot.isCorrigendum = record.isCorrigendum;
+  return snapshot;
 }
 
 function sindhPpraDocument(

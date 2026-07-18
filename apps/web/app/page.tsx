@@ -33,7 +33,7 @@ export default function HomePage(): JSX.Element {
                 Start workspace <ArrowRight className="h-4 w-4" />
               </LinkButton>
               <LinkButton className="bg-none bg-white/92 text-foreground shadow-soft backdrop-blur hover:bg-white" href="/tenders">
-                View tender preview
+                View Tenders
               </LinkButton>
             </div>
             <div className="mt-10 grid max-w-2xl gap-3 sm:grid-cols-3">

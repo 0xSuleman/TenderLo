@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RawTenderPayload } from "@tenderlo/shared";
 import {
+  appendFederalEstimatedValueLowerBound,
   buildSourceProvenance,
   buildTenderDocumentStoragePath,
   buildTenderFieldPromotion,
@@ -67,6 +68,9 @@ describe("worker tender persistence helpers", () => {
     expect(buildTenderFieldPromotion({ is_human_verified: true, bid_security_amount: null }, [
       { fieldName: "bid_security_amount", fieldValue: "500000", sourceMethod: "keyword_window", confidenceScore: 0.9, evidenceText: "Bid security", verificationStatus: "unverified" }
     ])).toEqual({});
+    expect(buildTenderFieldPromotion({ is_human_verified: false, bid_security_amount: 2_200_000 }, [
+      { fieldName: "bid_security_amount", fieldValue: "1200000", sourceMethod: "table_rule", confidenceScore: 0.94, evidenceText: "Lot 1", verificationStatus: "unverified" }
+    ])).toEqual({ bid_security_amount: 1_200_000 });
   });
 
   it("accepts genuine HTTP portal files and rejects HTML disguised as a PDF", () => {
@@ -79,7 +83,23 @@ describe("worker tender persistence helpers", () => {
       buffer: Buffer.from("<html>download error</html>"),
       contentType: "text/html",
       filename: "bidding-document.pdf"
-    })).toMatch(/does not have a PDF signature/i);
+    })).toMatch(/not downloadable tender documents/i);
+    expect(validateDownloadedDocument({
+      buffer: Buffer.from("<html>portal page</html>"),
+      contentType: "text/html; charset=UTF-8",
+      filename: "procurement-detail.html"
+    })).toMatch(/not downloadable tender documents/i);
+  });
+
+  it("derives only a labelled federal estimated-value lower bound from bid security", () => {
+    const fields = appendFederalEstimatedValueLowerBound([
+      { fieldName: "bid_security_amount", fieldValue: "500000", sourceMethod: "keyword_window", confidenceScore: 0.9, evidenceText: "Bid security Rs. 500,000", verificationStatus: "unverified" }
+    ]);
+    expect(fields.find((field) => field.fieldName === "estimated_value_lower_bound")?.fieldValue).toBe("10000000");
+    expect(fields.find((field) => field.fieldName === "estimated_value_summary")?.fieldValue).toContain("exact estimate not published");
+    expect(appendFederalEstimatedValueLowerBound([
+      { fieldName: "estimated_value", fieldValue: "12000000", sourceMethod: "regex", confidenceScore: 0.9, evidenceText: "Estimated value", verificationStatus: "unverified" }
+    ])).toHaveLength(1);
   });
 
   it("admits only current, core-complete tenders that advertise a document", () => {

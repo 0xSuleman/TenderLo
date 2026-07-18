@@ -204,7 +204,7 @@ export function parseMoneyCandidates(text: string): Array<{ value: number; evide
   const normalized = normalizeWhitespace(text);
   const results: Array<{ value: number; evidence: string; confidence: number }> = [];
   const moneyPattern =
-    /\b(?:PKR|Rs\.?|Rupees?)\s*([0-9][0-9,]*(?:\.\d+)?)\s*(million|billion|lac|lakh|crore|m|bn)?\b|\b([0-9][0-9,]*(?:\.\d+)?)\s*(million|billion|lac|lakh|crore)\s*(?:PKR|Rs\.?|Rupees?)?\b/gi;
+    /\b(?:PKR|Rs\.?|Rupees?)\s*([0-9][0-9,]*(?:\.\d+)?)\s*(million|billion|lac|lakh|crore|m|bn)?\b|\b([0-9][0-9,]*(?:\.\d+)?)\s*(million|billion|lac|lakh|crore|m|bn)?\s*(?:PKR|Rs\.?|Rupees?)\b/gi;
 
   for (const match of normalized.matchAll(moneyPattern)) {
     const amountText = match[1] ?? match[3];
@@ -225,8 +225,10 @@ export function extractTenderFields(text: string): ExtractedFieldResult[] {
   fields.push(...extractDateField(compactText, "closing_date", ["closing date", "last date", "submission deadline", "bid submission", "receiving of tenders", "must be submitted", "on or before", "date for submission"]));
   fields.push(...extractDateField(compactText, "opening_date", ["opening date", "bid opening", "opening of tenders", "will be opened", "shall be opened"]));
   fields.push(...extractMoneyField(compactText, "bid_security_amount", ["bid security", "earnest money", "security deposit", "call deposit", "bid bond"]));
-  fields.push(...extractMoneyField(compactText, "estimated_value", ["estimated cost", "estimated value", "nit cost", "engineer estimate", "project cost"]));
-  fields.push(...extractMoneyField(compactText, "document_fee", ["tender fee", "document fee", "bidding document fee"]));
+  fields.push(...extractMoneyField(compactText, "estimated_value", ["estimated cost", "estimated value", "nit cost", "engineer estimate", "engineer's estimate", "project cost", "estimated amount"]));
+  fields.push(...extractMoneyField(compactText, "document_fee", ["tender fee", "document fee", "bidding document fee", "cost of bidding document", "price of bidding document", "non-refundable fee"]));
+  fields.push(...extractContactFields(compactText));
+  fields.push(...extractExplicitFreeDocumentFee(compactText));
 
   const pecMatches = [...compactText.matchAll(pecRequirementPattern)];
   for (const match of pecMatches) {
@@ -262,6 +264,80 @@ export function extractTenderFields(text: string): ExtractedFieldResult[] {
     });
   }
 
+  return collapseFieldCandidates(fields);
+}
+
+export function extractFederalEpadsDocumentFields(text: string): ExtractedFieldResult[] {
+  const compactText = normalizeWhitespace(text);
+  const fields: ExtractedFieldResult[] = [];
+  const lower = compactText.toLowerCase();
+  const tableHeading = compactText.match(/item\s*unspsc.{0,120}?bid security/i);
+  const tableIndex = tableHeading?.index ?? -1;
+  const sectionEnd = lower.indexOf("related services", Math.max(0, tableIndex));
+  if (tableIndex >= 0) {
+    const bidSecuritySection = compactText.slice(tableIndex, sectionEnd > tableIndex ? sectionEnd : Math.min(compactText.length, tableIndex + 12_000));
+    const amounts = parseMoneyCandidates(bidSecuritySection)
+      .filter((candidate) => candidate.value > 0 && candidate.value < 1_000_000_000)
+      .filter((candidate, index, candidates) => candidates.findIndex((item) => item.value === candidate.value) === index)
+      .sort((left, right) => left.value - right.value);
+    for (const amount of amounts) {
+      const amountIndex = compactText.indexOf(amount.evidence, tableIndex);
+      fields.push({
+        fieldName: "bid_security_amount",
+        fieldValue: String(amount.value),
+        sourceMethod: "table_rule",
+        confidenceScore: 0.94,
+        evidenceText: windowAround(compactText, amountIndex >= 0 ? amountIndex : tableIndex, 260),
+        verificationStatus: "unverified"
+      });
+    }
+    if (amounts.length) {
+      const minimum = amounts[0]?.value ?? 0;
+      const maximum = amounts.at(-1)?.value ?? minimum;
+      const aggregateSecurity = amounts.reduce((sum, amount) => sum + amount.value, 0);
+      const estimatedValueLowerBound = aggregateSecurity * 20;
+      const summary = amounts.length === 1
+        ? `PKR ${minimum.toLocaleString("en-PK")}`
+        : `PKR ${minimum.toLocaleString("en-PK")}–${maximum.toLocaleString("en-PK")} (varies by lot; ${amounts.length} listed amounts)`;
+      fields.push({
+        fieldName: "bid_security_summary",
+        fieldValue: summary,
+        sourceMethod: "table_rule",
+        confidenceScore: 0.94,
+        evidenceText: windowAround(compactText, tableIndex, 520),
+        verificationStatus: "unverified"
+      });
+      fields.push({
+        fieldName: "estimated_value_lower_bound",
+        fieldValue: String(estimatedValueLowerBound),
+        sourceMethod: "table_rule",
+        confidenceScore: 0.82,
+        evidenceText: `Derived lower bound under PPRA Rule 25 (bid security may not exceed 5% of estimated value). ${windowAround(compactText, tableIndex, 520)}`,
+        verificationStatus: "unverified"
+      });
+      fields.push({
+        fieldName: "estimated_value_summary",
+        fieldValue: `At least PKR ${estimatedValueLowerBound.toLocaleString("en-PK")} (Rule 25 lower bound; exact estimate not published)`,
+        sourceMethod: "table_rule",
+        confidenceScore: 0.82,
+        evidenceText: `Derived lower bound under PPRA Rule 25 (bid security may not exceed 5% of estimated value). ${windowAround(compactText, tableIndex, 520)}`,
+        verificationStatus: "unverified"
+      });
+    }
+  }
+
+  const contactBlock = firstContactBlock(compactText);
+  const role = contactBlock?.match(/,\s*([A-Za-z][A-Za-z .&/()-]{2,70}?)\s+(?:\d+(?:st|nd|rd|th)?\s+Floor|Office|Building|Road|Street)\b/i)?.[1]?.trim();
+  if (role) {
+    fields.push({
+      fieldName: "contact_person",
+      fieldValue: role,
+      sourceMethod: "regex",
+      confidenceScore: 0.86,
+      evidenceText: contactBlock ?? role,
+      verificationStatus: "unverified"
+    });
+  }
   return collapseFieldCandidates(fields);
 }
 
@@ -380,6 +456,66 @@ function appendCorrectedMoneyField(fields: ExtractedFieldResult[], fieldName: st
     evidenceText,
     verificationStatus: "unverified"
   });
+}
+
+function extractContactFields(text: string): ExtractedFieldResult[] {
+  const fields: ExtractedFieldResult[] = [];
+  const emails = [...text.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)];
+  for (const match of emails.slice(0, 4)) {
+    fields.push({
+      fieldName: "contact_email",
+      fieldValue: match[0].toLowerCase(),
+      sourceMethod: "regex",
+      confidenceScore: 0.94,
+      evidenceText: windowAround(text, match.index ?? 0, 180),
+      verificationStatus: "unverified"
+    });
+  }
+
+  const phones = [...text.matchAll(/(?:\+?92[\s().-]*|0)(?:3\d{2}|\d{2,3})[\s().-]*\d{3,4}[\s.-]*\d{3,4}\b/g)];
+  for (const match of phones.slice(0, 4)) {
+    fields.push({
+      fieldName: "contact_phone",
+      fieldValue: normalizeWhitespace(match[0]),
+      sourceMethod: "regex",
+      confidenceScore: 0.92,
+      evidenceText: windowAround(text, match.index ?? 0, 180),
+      verificationStatus: "unverified"
+    });
+  }
+
+  const labelledPerson = text.match(/\b(?:contact person|authorized representative|focal person)\s*[:\-]\s*([A-Za-z][A-Za-z .'-]{2,80})(?=\s*(?:,|\||phone|mobile|email|$))/i);
+  if (labelledPerson?.[1]) {
+    fields.push({
+      fieldName: "contact_person",
+      fieldValue: labelledPerson[1].trim(),
+      sourceMethod: "regex",
+      confidenceScore: 0.9,
+      evidenceText: windowAround(text, labelledPerson.index ?? 0, 180),
+      verificationStatus: "unverified"
+    });
+  }
+  return fields;
+}
+
+function extractExplicitFreeDocumentFee(text: string): ExtractedFieldResult[] {
+  const match = text.match(/(?:bidding|tender) documents?.{0,100}?(?:free of cost|without cost|at no cost)|(?:free of cost|without cost|at no cost).{0,100}?(?:bidding|tender) documents?/i);
+  if (!match) return [];
+  return [{
+    fieldName: "document_fee",
+    fieldValue: "0",
+    sourceMethod: "regex",
+    confidenceScore: 0.94,
+    evidenceText: windowAround(text, match.index ?? 0, 180),
+    verificationStatus: "unverified"
+  }];
+}
+
+function firstContactBlock(text: string): string | null {
+  const email = text.search(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
+  const phone = text.search(/\bPhone\s*:/i);
+  const target = email >= 0 && phone >= 0 ? Math.min(email, phone) : Math.max(email, phone);
+  return target >= 0 ? windowAround(text, target, 340) : null;
 }
 
 function extractDateField(text: string, fieldName: string, keywords: string[]): ExtractedFieldResult[] {

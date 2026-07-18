@@ -4,6 +4,7 @@ import {
   calculateDuplicateConfidence,
   classifyTender,
   detectGeography,
+  extractFederalEpadsDocumentFields,
   extractKpPpraNoticeFields,
   extractPunjabPpraCorrectionFields,
   extractTenderFields,
@@ -20,8 +21,9 @@ describe("deterministic tender intelligence", () => {
   });
 
   it("parses rupee money formats", () => {
-    const money = parseMoneyCandidates("Bid security Rs. 2.5 million and document fee PKR 5,000.");
+    const money = parseMoneyCandidates("Bid security Rs. 2.5 million, lot security 1200000 PKR, and document fee PKR 5,000.");
     expect(money.map((item) => item.value)).toContain(2_500_000);
+    expect(money.map((item) => item.value)).toContain(1_200_000);
     expect(money.map((item) => item.value)).toContain(5_000);
   });
 
@@ -34,6 +36,22 @@ describe("deterministic tender intelligence", () => {
     const epadsDates = extractTenderFields("The RFP must be submitted on Monday, July 20, 2026 10:00 AM. Proposals will be opened on Monday, July 20, 2026 10:30 AM.");
     expect(epadsDates.find((field) => field.fieldName === "closing_date")?.fieldValue).toBe("2026-07-20T10:00:00.000Z");
     expect(epadsDates.find((field) => field.fieldName === "opening_date")?.fieldValue).toBe("2026-07-20T10:30:00.000Z");
+  });
+
+  it("extracts EPADS lot securities and contact evidence from generated bidding documents", () => {
+    const text = "Ministry of Education. (Ministry of Education),Section Officer 2nd Floor, C-Block, Pak-Sec Islamabad. " +
+      "Phone: +92-321-511-1688, Email: talat@moe.gov.pk Items/Lots Item UNSPSC Delivery Schedule Quantity Bid Security " +
+      "Lot No. 1 Office stationery Quantity: 1/Lot 1 1/Lot 1200000 PKR ------ " +
+      "Lot No. 2 Computer stationery Quantity: 1/Lot 2 1/Lot 2200000 PKR ------ Related Services of Goods: No";
+    const common = extractTenderFields(text);
+    const epads = extractFederalEpadsDocumentFields(text);
+    expect(common.find((field) => field.fieldName === "contact_email")?.fieldValue).toBe("talat@moe.gov.pk");
+    expect(common.find((field) => field.fieldName === "contact_phone")?.fieldValue).toBe("+92-321-511-1688");
+    expect(epads.find((field) => field.fieldName === "contact_person")?.fieldValue).toBe("Section Officer");
+    expect(epads.filter((field) => field.fieldName === "bid_security_amount").map((field) => field.fieldValue)).toEqual(["1200000", "2200000"]);
+    expect(epads.find((field) => field.fieldName === "bid_security_summary")?.fieldValue).toContain("varies by lot");
+    expect(epads.find((field) => field.fieldName === "estimated_value_lower_bound")?.fieldValue).toBe("68000000");
+    expect(epads.find((field) => field.fieldName === "estimated_value_summary")?.fieldValue).toContain("exact estimate not published");
   });
 
   it("prefers Punjab PPRA corrigendum replacement values", () => {
