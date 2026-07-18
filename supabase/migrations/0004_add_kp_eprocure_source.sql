@@ -1,5 +1,10 @@
 -- KP's EPADS public portal has a separate public API and document flow from
 -- the legacy KPPRA active-tenders site, so it is indexed as its own source.
+-- Older preview projects may have been created before source metadata was
+-- introduced. Keep this additive migration safe for those databases.
+alter table tender_sources
+  add column if not exists metadata jsonb not null default '{}'::jsonb;
+
 insert into tender_sources (
   name,
   base_url,

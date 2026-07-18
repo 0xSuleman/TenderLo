@@ -1,4 +1,7 @@
 -- Keep the package migration copy aligned with Supabase migrations.
+alter table tender_sources
+  add column if not exists metadata jsonb not null default '{}'::jsonb;
+
 insert into tender_sources (
   name,
   base_url,
