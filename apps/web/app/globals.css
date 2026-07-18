@@ -1,55 +1,73 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────
+   Design Tokens
+───────────────────────────────────────── */
 :root {
-  --background: 210 42% 98%;
-  --foreground: 222 47% 11%;
-  --muted: 214 32% 92%;
-  --muted-foreground: 218 14% 38%;
-  --border: 214 28% 82%;
-  --primary: 213 80% 34%;
+  /* Base */
+  --background:     0 0% 100%;
+  --foreground:     222 47% 11%;
+
+  /* Surfaces */
+  --surface:        210 40% 98%;
+  --surface-raised: 214 32% 96%;
+
+  /* Borders */
+  --border:         214 28% 89%;
+
+  /* Brand — Emerald green */
+  --primary:        160 84% 29%;        /* #059669 */
   --primary-foreground: 0 0% 100%;
-  --secondary: 39 94% 54%;
-  --secondary-foreground: 222 47% 11%;
-  --accent: 187 74% 37%;
-  --accent-foreground: 0 0% 100%;
-  --success: 151 70% 31%;
+  --primary-light:  151 81% 96%;        /* #ECFDF5 */
+
+  /* Navy — dark authority */
+  --navy:           222 47% 16%;        /* #1E293B */
+  --navy-foreground: 0 0% 100%;
+
+  /* Muted */
+  --muted:          214 32% 92%;
+  --muted-foreground: 218 14% 44%;
+
+  /* Status */
+  --success:        152 69% 31%;
   --success-foreground: 0 0% 100%;
-  --warning: 38 95% 48%;
+  --success-bg:     152 76% 96%;
+
+  --warning:        38 95% 48%;
   --warning-foreground: 222 47% 11%;
-  --destructive: 0 72% 45%;
+  --warning-bg:     48 100% 96%;
+
+  --destructive:    0 72% 51%;
   --destructive-foreground: 0 0% 100%;
-  --surface: 0 0% 100%;
-  --surface-strong: 210 40% 99%;
-  --ring-glow: 213 80% 48%;
+  --destructive-bg: 0 86% 97%;
+
+  /* Focus ring */
+  --ring: 160 84% 29%;
 }
 
-* {
+/* ─────────────────────────────────────────
+   Base Reset
+───────────────────────────────────────── */
+*, *::before, *::after {
   box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, hsl(213 80% 90% / 0.82), transparent 34rem),
-    radial-gradient(circle at bottom right, hsl(39 94% 87% / 0.76), transparent 30rem),
-    linear-gradient(135deg, hsl(210 42% 98%) 0%, hsl(190 48% 96%) 47%, hsl(42 100% 97%) 100%);
+  background-color: hsl(var(--background));
   color: hsl(var(--foreground));
+  font-family: var(--font-inter, "Inter"), system-ui, sans-serif;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   text-rendering: optimizeLegibility;
-}
-
-body::before {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  content: "";
-  background:
-    linear-gradient(115deg, hsl(213 80% 34% / 0.13), transparent 34%),
-    linear-gradient(245deg, hsl(39 94% 54% / 0.16), transparent 42%),
-    linear-gradient(180deg, hsl(0 0% 100% / 0.72), hsl(0 0% 100% / 0.28));
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -57,105 +75,160 @@ a {
 }
 
 ::selection {
-  background: hsl(var(--accent) / 0.38);
+  background: hsl(var(--primary) / 0.14);
 }
 
+/* Focus visible ring */
+:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+/* ─────────────────────────────────────────
+   Utility Classes
+───────────────────────────────────────── */
 @layer utilities {
-  .premium-surface {
-    background:
-      linear-gradient(145deg, hsl(var(--surface) / 0.84), hsl(var(--surface-strong) / 0.62)),
-      linear-gradient(135deg, hsl(var(--primary) / 0.09), hsl(var(--secondary) / 0.08));
-    border-color: hsl(var(--border) / 0.72);
-    box-shadow: 0 18px 48px hsl(213 45% 18% / 0.1), inset 0 1px 0 hsl(0 0% 100% / 0.72);
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
+
+  /* ── Cards ── */
+  .card {
+    background-color: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04);
+    padding: 1.5rem;
   }
 
-  .premium-gradient {
-    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--accent)) 56%, hsl(var(--secondary)));
+  .card-dark {
+    background-color: hsl(var(--navy));
+    color: hsl(var(--navy-foreground));
+    border-radius: 1rem;
+    padding: 1.5rem;
   }
 
-  .premium-gradient-subtle {
-    background-image: linear-gradient(135deg, hsl(var(--primary) / 0.1), hsl(var(--accent) / 0.08), hsl(var(--secondary) / 0.12));
+  .card-accent {
+    background-color: hsl(var(--primary-light));
+    border: 1px solid hsl(var(--primary) / 0.25);
+    border-left: 3px solid hsl(var(--primary));
+    border-radius: 0.75rem;
+    padding: 1.5rem;
   }
 
-  .premium-grid {
-    background-image:
-      linear-gradient(hsl(var(--primary) / 0.06) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(var(--primary) / 0.06) 1px, transparent 1px);
-    background-size: 34px 34px;
+  /* ── Interactions ── */
+  .lift {
+    transition: transform 150ms ease, box-shadow 150ms ease;
   }
 
-  .premium-focus {
-    outline: none;
-    transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
-  }
-
-  .premium-focus:focus {
-    border-color: hsl(var(--primary) / 0.68);
-    box-shadow: 0 0 0 4px hsl(var(--ring-glow) / 0.16), 0 10px 30px hsl(213 45% 18% / 0.08);
-  }
-
-  .animate-rise {
-    animation: rise-in 520ms ease both;
-  }
-
-  .interactive-lift {
-    transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease, background-color 200ms ease;
-  }
-
-  .interactive-lift:hover {
+  .lift:hover {
     transform: translateY(-2px);
-    box-shadow: 0 24px 64px hsl(213 45% 18% / 0.16);
+    box-shadow: 0 12px 40px rgba(15,23,42,0.10), 0 4px 8px rgba(15,23,42,0.04);
   }
 
-  .shimmer-surface {
+  .lift:active {
+    transform: translateY(0);
+  }
+
+  /* ── Animations ── */
+  .animate-in {
+    animation: fade-slide-up 400ms ease both;
+  }
+
+  .delay-1 { animation-delay: 60ms; }
+  .delay-2 { animation-delay: 120ms; }
+  .delay-3 { animation-delay: 180ms; }
+  .delay-4 { animation-delay: 240ms; }
+
+  /* ── Shimmer skeleton ── */
+  .skeleton {
     position: relative;
     overflow: hidden;
-    background: hsl(var(--muted) / 0.78);
+    background-color: hsl(var(--muted));
+    border-radius: 0.375rem;
   }
 
-  .shimmer-surface::after {
+  .skeleton::after {
+    content: "";
     position: absolute;
     inset: 0;
-    content: "";
     transform: translateX(-100%);
-    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.72), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.60), transparent);
     animation: shimmer 1.8s linear infinite;
   }
 
-  .motion-safe-delay-1 {
-    animation-delay: 90ms;
+  /* ── Input focus ── */
+  .field-input {
+    height: 2.5rem;
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid hsl(var(--border));
+    background-color: hsl(var(--background));
+    padding: 0 0.75rem;
+    font-size: 0.875rem;
+    color: hsl(var(--foreground));
+    transition: border-color 150ms ease, box-shadow 150ms ease;
   }
 
-  .motion-safe-delay-2 {
-    animation-delay: 180ms;
+  .field-input::placeholder {
+    color: hsl(var(--muted-foreground));
   }
 
-  .motion-safe-delay-3 {
-    animation-delay: 270ms;
+  .field-input:focus {
+    outline: none;
+    border-color: hsl(var(--primary));
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.15);
   }
+
+  /* ── Section spacing ── */
+  .section {
+    padding-top: 5rem;
+    padding-bottom: 5rem;
+  }
+
+  .section-sm {
+    padding-top: 3rem;
+    padding-bottom: 3rem;
+  }
+
+  .container {
+    max-width: 72rem;
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+
+  /* ── Status left-border strips (tender cards) ── */
+  .status-active   { border-left: 3px solid hsl(var(--success)); }
+  .status-warning  { border-left: 3px solid hsl(var(--warning)); }
+  .status-expired  { border-left: 3px solid hsl(var(--destructive)); }
+  .status-review   { border-left: 3px solid hsl(var(--muted-foreground)); }
 }
 
-@keyframes rise-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* ─────────────────────────────────────────
+   Keyframes
+───────────────────────────────────────── */
+@keyframes fade-slide-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-6px); }
+}
+
+/* ─────────────────────────────────────────
+   Reduced Motion
+───────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

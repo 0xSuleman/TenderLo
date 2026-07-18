@@ -126,22 +126,22 @@ export default async function TenderSlugPage({ params }: { params: Promise<{ slu
           Back to all tenders
         </a>
 
-        <header className="premium-gradient animate-rise relative overflow-hidden rounded-lg p-6 text-primary-foreground shadow-glow md:p-8">
-          <div aria-hidden="true" className="absolute -right-20 -top-24 size-64 rounded-full bg-white/15 blur-3xl" />
-          <div aria-hidden="true" className="absolute -bottom-28 left-1/3 size-64 rounded-full bg-secondary/30 blur-3xl" />
+        <header className="card-dark relative overflow-hidden p-6 md:p-8 animate-in">
+          <div aria-hidden="true" className="absolute -right-20 -top-24 size-64 rounded-full bg-white/5 blur-3xl" />
+          <div aria-hidden="true" className="absolute -bottom-28 left-1/3 size-64 rounded-full bg-primary/10 blur-3xl" />
           <div className="relative grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
-              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-white/75">Tender opportunity</p>
-              <h1 className="max-w-5xl break-words font-display text-3xl font-semibold leading-tight md:text-4xl">{tender.title}</h1>
-              <div className="mt-5 flex flex-wrap gap-x-6 gap-y-3 text-sm text-white/90">
-                <span className="flex min-w-0 items-start gap-2"><Tag className="mt-0.5 h-4 w-4 shrink-0" /><strong className="shrink-0">Tender No:</strong><span className="break-all">{tender.tender_number ?? "Needs review"}</span></span>
-                <span className="flex min-w-0 items-start gap-2"><Landmark className="mt-0.5 h-4 w-4 shrink-0" /><strong className="shrink-0">Issuing authority:</strong><span className="break-words">{tender.department ?? "Needs review"}</span></span>
+              <p className="mb-3 text-xs font-bold uppercase tracking-wider text-emerald-400">Tender opportunity</p>
+              <h1 className="max-w-5xl break-words font-display text-3xl font-extrabold tracking-tight text-white leading-tight md:text-4xl">{tender.title}</h1>
+              <div className="mt-5 flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-300">
+                <span className="flex min-w-0 items-start gap-2"><Tag className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" /><strong className="shrink-0 text-white">Tender No:</strong><span className="break-all">{tender.tender_number ?? "Needs review"}</span></span>
+                <span className="flex min-w-0 items-start gap-2"><Landmark className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" /><strong className="shrink-0 text-white">Issuing authority:</strong><span className="break-words">{tender.department ?? "Needs review"}</span></span>
               </div>
             </div>
-            <div className="min-w-52 rounded-lg border border-white/25 bg-white/14 p-4 shadow-soft backdrop-blur-xl">
-              <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">{isActive ? "Active Tender" : "Expired / Non-Active"}</span>
-              <p className="mt-4 flex items-center gap-2 text-sm font-semibold"><Clock3 className="h-4 w-4" />Closing date</p>
-              <p className="mt-1 pl-6 text-sm text-white/90">{formatDateTime(tender.closing_date)}</p>
+            <div className="min-w-52 rounded-xl border border-white/10 bg-white/5 p-4 shadow-sm backdrop-blur-xl">
+              <span className="inline-flex rounded-full bg-success-bg px-3 py-1 text-xs font-bold text-success border border-success/15">{isActive ? "Active Tender" : "Expired / Non-Active"}</span>
+              <p className="mt-4 flex items-center gap-2 text-sm font-semibold text-white"><Clock3 className="h-4 w-4 text-emerald-400" />Closing date</p>
+              <p className="mt-1 pl-6 text-sm text-slate-300">{formatDateTime(tender.closing_date)}</p>
             </div>
           </div>
         </header>
@@ -225,7 +225,7 @@ export default async function TenderSlugPage({ params }: { params: Promise<{ slu
                 {fullAccess && docs.length > 1 ? (
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     {docs.map((document) => (
-                      <a key={document.id} className="premium-surface interactive-lift inline-flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm font-semibold" href={tenderFileUrl(document.storage_path)}>
+                      <a key={document.id} className="card lift inline-flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm font-semibold hover:border-primary/30" href={tenderFileUrl(document.storage_path)}>
                         <span className="truncate">{document.original_filename}</span>
                         <Download className="h-4 w-4 shrink-0 text-primary" />
                       </a>

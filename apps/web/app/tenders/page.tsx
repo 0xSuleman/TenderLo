@@ -3,6 +3,7 @@ import { tenderDetailPath, tenderSearchSchema } from "@tenderlo/shared";
 import { MarketingNav } from "@/components/nav";
 import { MotionItem, MotionList } from "@/components/motion";
 import { Badge, Button, Card, EmptyState, Field, Input, LinkButton, PageHeader, Select } from "@/components/ui";
+import { TenderListInteractive } from "@/components/TenderListInteractive";
 import { createSupabaseAdminClient } from "@/lib/supabase";
 import { formatDate } from "@/lib/utils";
 import { listTenderFilterOptions, searchTenders, type TenderFilterOptions, type TenderSearchResult } from "@/lib/tender-search";
@@ -130,34 +131,15 @@ export default async function PublicTenderPreviewPage({ searchParams }: { search
           <LinkButton href="/signup">Unlock full details</LinkButton>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-4">
           {result.data.length === 0 ? (
-            <div className="md:col-span-2">
-              <EmptyState
-                body="Published tenders will appear here after source ingestion or ops review publishes records."
-                icon={<FileSearch className="h-7 w-7" />}
-                title="No public tender previews match these filters"
-              />
-            </div>
+            <EmptyState
+              body="Published tenders will appear here after source ingestion or ops review publishes records."
+              icon={<FileSearch className="h-7 w-7" />}
+              title="No public tender previews match these filters"
+            />
           ) : null}
-          <MotionList className="contents">
-            {result.data.map((tender) => (
-              <MotionItem key={String(tender.id)}>
-                <Card>
-                  <div className="mb-3 flex flex-wrap gap-2">
-                    <Badge tone={tender.active_status === "Active" ? "good" : "warn"}>{String(tender.active_status ?? "Active")}</Badge>
-                    {tender.category ? <Badge>{String(tender.category)}</Badge> : null}
-                    {tender.sector ? <Badge>{String(tender.sector).replaceAll("_", " ")}</Badge> : null}
-                  </div>
-                  <h2 className="font-semibold">{String(tender.title ?? "Untitled tender")}</h2>
-                  <p className="mt-2 text-sm text-muted-foreground">{String(tender.department ?? "Department needs review")} · {String(tender.city ?? tender.province ?? "Pakistan")}</p>
-                  <p className="mt-2 text-sm">Closing: {formatDate(tender.closing_date as string | null | undefined)}</p>
-                  {typeof tender.preview === "string" && tender.preview ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{tender.preview}</p> : null}
-                  <LinkButton className="mt-4" href={tenderHref(tender)}>View Tender</LinkButton>
-                </Card>
-              </MotionItem>
-            ))}
-          </MotionList>
+          <TenderListInteractive tenders={result.data} fullAccess={false} />
         </div>
 
         {result.pagination.totalPages > 1 ? (
